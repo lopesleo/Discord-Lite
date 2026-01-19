@@ -1169,27 +1169,41 @@ class Plugin:
         return {"success": False, "message": result.get("message", "Falha")}
     
     async def set_input_volume(self, volume: int) -> dict:
+        decky.logger.info(f"Discord Lite: set_input_volume chamado com volume={volume}")
         if not self.rpc or not self.rpc.authenticated:
+            decky.logger.error("Discord Lite: Não autenticado para set_input_volume")
             return {"success": False, "message": "Não autenticado"}
         
         volume = max(0, min(100, volume))
+        decky.logger.info(f"Discord Lite: Enviando SET_VOICE_SETTINGS input volume={volume}")
         result = self.rpc.set_voice_settings(input={"volume": volume})
+        decky.logger.info(f"Discord Lite: Resultado SET_VOICE_SETTINGS: {result}")
+        
         if result.get("success"):
             self.rpc.input_volume = volume
+            decky.logger.info(f"Discord Lite: Volume de entrada definido para {volume}")
             return {"success": True, "volume": volume}
         
+        decky.logger.error(f"Discord Lite: Falha ao definir volume de entrada: {result}")
         return {"success": False, "message": result.get("message", "Falha")}
     
     async def set_output_volume(self, volume: int) -> dict:
+        decky.logger.info(f"Discord Lite: set_output_volume chamado com volume={volume}")
         if not self.rpc or not self.rpc.authenticated:
+            decky.logger.error("Discord Lite: Não autenticado para set_output_volume")
             return {"success": False, "message": "Não autenticado"}
         
         volume = max(0, min(200, volume))
+        decky.logger.info(f"Discord Lite: Enviando SET_VOICE_SETTINGS output volume={volume}")
         result = self.rpc.set_voice_settings(output={"volume": volume})
+        decky.logger.info(f"Discord Lite: Resultado SET_VOICE_SETTINGS: {result}")
+        
         if result.get("success"):
             self.rpc.output_volume = volume
+            decky.logger.info(f"Discord Lite: Volume de saída definido para {volume}")
             return {"success": True, "volume": volume}
         
+        decky.logger.error(f"Discord Lite: Falha ao definir volume de saída: {result}")
         return {"success": False, "message": result.get("message", "Falha")}
     
     async def leave_voice(self) -> dict:
@@ -1261,20 +1275,35 @@ class Plugin:
     async def set_user_volume(self, user_id: str, volume: int) -> dict:
         if not self.rpc or not self.rpc.authenticated:
             return {"success": False, "message": "Não autenticado"}
-        
+
         volume = max(0, min(200, volume))
+
+        # Se o user_id for do próprio usuário, redirecionar para set_output_volume
+        if self.rpc.user and str(self.rpc.user.get('id')) == str(user_id):
+            decky.logger.info(f"Discord Lite: Redirecionando volume do próprio usuário para output_volume")
+            return await self.set_output_volume(volume)
+
         if self.rpc.set_user_voice_settings(user_id, volume=volume):
             return {"success": True, "user_id": user_id, "volume": volume}
-        
+
         return {"success": False, "message": "Falha"}
     
     async def mute_user(self, user_id: str, mute: bool) -> dict:
         if not self.rpc or not self.rpc.authenticated:
             return {"success": False, "message": "Não autenticado"}
-        
+
+        # Se o user_id for do próprio usuário, redirecionar para toggle_mute
+        if self.rpc.user and str(self.rpc.user.get('id')) == str(user_id):
+            decky.logger.info(f"Discord Lite: Redirecionando mute do próprio usuário para toggle_mute")
+            current_mute_state = self.rpc.is_muted
+            if current_mute_state != mute:
+                return await self.toggle_mute()
+            else:
+                return {"success": True, "user_id": user_id, "muted": mute, "message": "Estado já correto"}
+
         if self.rpc.set_user_voice_settings(user_id, mute=mute):
             return {"success": True, "user_id": user_id, "muted": mute}
-        
+
         return {"success": False, "message": "Falha"}
     
     # ==================== CONFIGURAÇÕES AVANÇADAS ====================
