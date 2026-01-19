@@ -1,11 +1,10 @@
 {
-  "name": "Example Plugin",
-  "author": "John Doe",
-  "flags": ["debug", "_root"],
-  "api_version": 1,
+  "name": "Discord Lite",
+  "author": "lopesleo",
+  "flags": [],
+  "api_version": 2,
   "publish": {
-    "tags": ["template", "root"],
-    "description": "Decky example plugin.",
-    "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
+    "tags": ["utility", "discord"],
+    "description": "Controles rápidos do Discord"
   }
 }
