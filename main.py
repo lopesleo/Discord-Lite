@@ -14,6 +14,8 @@ import urllib.request
 import urllib.error
 from typing import Optional, Dict, List, Callable, Any
 from queue import Queue, Empty
+import hashlib
+import base64
 
 # The decky plugin module is located at decky-loader/plugin
 import decky
@@ -135,11 +137,18 @@ class DiscordRPC:
             decky.logger.error(f"Discord Lite: Erro no comando {cmd}: {e}")
             return None
     
-    def authorize(self, scopes: list) -> Optional[str]:
-        result = self.send_command("AUTHORIZE", {
+    def authorize(self, scopes: list, code_challenge: str = None) -> Optional[str]:
+        args = {
             "client_id": self.client_id,
             "scopes": scopes,
-        })
+        }
+        
+        # Adiciona PKCE se fornecido
+        if code_challenge:
+            args["code_challenge"] = code_challenge
+            args["code_challenge_method"] = "S256"
+
+        result = self.send_command("AUTHORIZE", args)
         
         if result and result.get("data"):
             return result["data"].get("code")
@@ -356,7 +365,6 @@ class Plugin:
     """Discord Lite - Controle completo do Discord via Steam Deck"""
     
     CLIENT_ID = "1461502476401381446"
-    CLIENT_SECRET = "KViXxKrEq_amyJY1CqHpGJmX8xpSzhFK"  # TODO: Move to settings file before publishing
     SCOPES = ["rpc", "rpc.voice.read", "rpc.voice.write"]
     
     rpc: Optional[DiscordRPC] = None
@@ -871,23 +879,34 @@ class Plugin:
         
         return {"success": True, "events": events}
     
-    def _exchange_code_sync(self, code: str) -> dict:
+    def _generate_pkce(self):
+        """Gera o par Verifier/Challenge para PKCE"""
+        verifier = secrets.token_urlsafe(32)
+        digest = hashlib.sha256(verifier.encode()).digest()
+        # Base64 URL-safe sem padding
+        challenge = base64.urlsafe_b64encode(digest).decode().rstrip('=')
+        return verifier, challenge
+    
+    def _exchange_code_sync(self, code: str, code_verifier: str) -> dict:
         import urllib.request
         import urllib.parse
-        import base64
         import ssl
         
-        decky.logger.info("Discord Lite: Trocando código por token...")
+        decky.logger.info("Discord Lite: Trocando código por token (PKCE)...")
         
-        credentials = base64.b64encode(
-            f"{self.CLIENT_ID}:{self.CLIENT_SECRET}".encode()
-        ).decode()
-        
-        data = urllib.parse.urlencode({
+        # Payload para Cliente Público (sem client_secret)
+        data_dict = {
             "grant_type": "authorization_code",
-            "code": code
-        }).encode()
+            "client_id": self.CLIENT_ID,
+            "code": code,
+            "code_verifier": code_verifier,
+            # Se der erro de "redirect_uri mismatch", descomente a linha abaixo:
+            # "redirect_uri": "http://127.0.0.1" 
+        }
         
+        data = urllib.parse.urlencode(data_dict).encode()
+        
+        # Contexto SSL seguro para Steam Deck
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
@@ -899,9 +918,9 @@ class Plugin:
                 method="POST",
                 headers={
                     "Content-Type": "application/x-www-form-urlencoded",
-                    "Authorization": f"Basic {credentials}",
                     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-                    "Accept": "application/json",
+                    "Accept": "application/json"
+                    # Note que não enviamos mais o header Authorization Basic!
                 }
             )
             
@@ -910,14 +929,19 @@ class Plugin:
                 access_token = result.get("access_token")
                 
                 if access_token:
-                    decky.logger.info("Discord Lite: Token obtido!")
+                    decky.logger.info("Discord Lite: Token obtido via PKCE!")
                     return {"success": True, "access_token": access_token}
+                else:
+                    decky.logger.error(f"Discord Lite: Resposta sem token: {result}")
+                    return {"success": False, "message": f"Erro na API: {result.get('error_description')}"}
                     
+        except urllib.error.HTTPError as e:
+            error_msg = e.read().decode()
+            decky.logger.error(f"Discord Lite: Erro HTTP {e.code}: {error_msg}")
+            return {"success": False, "message": f"Erro HTTP {e.code}"}
         except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro: {e}")
+            decky.logger.error(f"Discord Lite: Erro Geral: {e}")
             return {"success": False, "message": str(e)}
-        
-        return {"success": False, "message": "Falha ao trocar código"}
     
     # ==================== DISCORD LAUNCHER ====================
     
@@ -974,7 +998,7 @@ class Plugin:
     # ==================== AUTO AUTH ====================
     
     async def auto_auth(self) -> dict:
-        decky.logger.info("Discord Lite: Iniciando auto_auth...")
+        decky.logger.info("Discord Lite: Iniciando auto_auth (PKCE)...")
         
         if self.auth_in_progress:
             return {"success": False, "authenticated": False, "message": "Autorização em andamento..."}
@@ -987,47 +1011,53 @@ class Plugin:
             if not self.rpc.connect():
                 return {"success": False, "authenticated": False, "message": "Discord não está aberto"}
             
+            # Tenta usar token salvo
             if self.access_token:
                 if self.rpc.authenticate(self.access_token):
                     username = self.rpc.user.get('username', 'usuário') if self.rpc.user else 'usuário'
-                    # Iniciar polling após autenticação
                     self.start_voice_polling()
                     return {
-                        "success": True,
-                        "authenticated": True,
-                        "user": self.rpc.user,
-                        "message": f"Conectado como {username}"
+                        "success": True, 
+                        "authenticated": True, 
+                        "user": self.rpc.user, 
+                        "message": f"Reconectado como {username}"
                     }
                 else:
-                    self.access_token = None
+                    self.access_token = None # Token inválido
             
-            code = self.rpc.authorize(self.SCOPES)
+            # --- INICIO DO FLUXO PKCE ---
+            # 1. Gera o desafio
+            verifier, challenge = self._generate_pkce()
+            
+            # 2. Pede autorização ao Discord Local enviando o challenge
+            code = self.rpc.authorize(self.SCOPES, code_challenge=challenge)
             
             if not code:
-                return {"success": False, "authenticated": False, "message": "Autorização não concedida"}
+                return {"success": False, "authenticated": False, "message": "Autorização negada pelo usuário"}
             
-            exchange_result = self._exchange_code_sync(code)
+            # 3. Troca o código pelo token enviando o verifier
+            exchange_result = self._exchange_code_sync(code, code_verifier=verifier)
             
             if not exchange_result.get("success"):
                 return {
-                    "success": False,
-                    "authenticated": False,
+                    "success": False, 
+                    "authenticated": False, 
                     "message": exchange_result.get("message", "Falha ao obter token")
                 }
             
             access_token = exchange_result.get("access_token")
             
+            # 4. Reconecta e autentica
             self.rpc.disconnect()
             self.rpc = DiscordRPC(self.CLIENT_ID)
             
             if not self.rpc.connect():
-                return {"success": False, "authenticated": False, "message": "Falha ao reconectar"}
+                return {"success": False, "authenticated": False, "message": "Falha ao reconectar RPC"}
             
             if self.rpc.authenticate(access_token):
                 self.access_token = access_token
                 self.save_token(access_token)
                 username = self.rpc.user.get('username', 'usuário') if self.rpc.user else 'usuário'
-                # Iniciar polling após autenticação
                 self.start_voice_polling()
                 return {
                     "success": True,
@@ -1036,10 +1066,10 @@ class Plugin:
                     "message": f"Conectado como {username}"
                 }
             
-            return {"success": False, "authenticated": False, "message": "Falha na autenticação"}
+            return {"success": False, "authenticated": False, "message": "Falha na autenticação final"}
             
         except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro em auto_auth: {e}")
+            decky.logger.error(f"Discord Lite: Erro crítico em auto_auth: {e}")
             return {"success": False, "authenticated": False, "message": str(e)}
         finally:
             self.auth_in_progress = False
