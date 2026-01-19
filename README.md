@@ -20,16 +20,17 @@ _Control your Discord voice calls directly from the Quick Access Menu_
 
 ### ✨ Features
 
-| Feature                    | Description                                      |
-| -------------------------- | ------------------------------------------------ |
-| 🎤 **Voice Chat Controls** | Join/leave voice channels, mute/deafen yourself  |
-| 📢 **Channel Browsing**    | Browse servers, channels, and see online members |
-| 🔊 **Volume Control**      | Per-user volume adjustment with memory           |
-| ⏱️ **Call Timer**          | See how long you've been in the call             |
-| 🔔 **Notification Toggle** | Disable notifications during games               |
-| 🔗 **Auto-Connect**        | Automatically connect to Discord on startup      |
-| 🌐 **Multi-Language**      | English and Portuguese support                   |
-| 🎨 **Discord Theme**       | Beautiful Discord-inspired UI                    |
+| Feature                    | Description                                                              |
+| -------------------------- | ------------------------------------------------------------------------ |
+| 🎤 **Voice Chat Controls** | Join/leave voice channels, mute/deafen yourself                          |
+| 📢 **Channel Browsing**    | Browse servers, channels, and see online members                         |
+| 🔊 **Volume Control**      | Per-user volume adjustment with memory                                   |
+| ⏱️ **Call Timer**          | See how long you've been in the call                                     |
+| 🎮 **Game Activity**       | Automatically updates Discord status with the Steam game you are playing |
+| 🔔 **Notification Toggle** | Disable notifications during games                                       |
+| 🔗 **Auto-Connect**        | Automatically connect to Discord on startup                              |
+| 🌐 **Multi-Language**      | English and Portuguese support                                           |
+| 🎨 **Discord Theme**       | Beautiful Discord-inspired UI                                            |
 
 ### 📸 Screenshots
 
@@ -105,16 +106,17 @@ _Screenshots coming soon!_
 
 ### ✨ Funcionalidades
 
-| Funcionalidade                | Descrição                                       |
-| ----------------------------- | ----------------------------------------------- |
-| 🎤 **Controles de Voz**       | Entrar/sair de canais, mutar/ensurdecer         |
-| 📢 **Navegação de Canais**    | Navegar servidores, canais e ver membros online |
-| 🔊 **Controle de Volume**     | Ajuste de volume por usuário com memória        |
-| ⏱️ **Tempo na Call**          | Veja quanto tempo você está na chamada          |
-| 🔔 **Toggle de Notificações** | Desative notificações durante jogos             |
-| 🔗 **Auto-Conectar**          | Conecte automaticamente ao Discord ao iniciar   |
-| 🌐 **Multi-Idioma**           | Suporte a Inglês e Português                    |
-| 🎨 **Tema Discord**           | Interface bonita inspirada no Discord           |
+| Funcionalidade                | Descrição                                                           |
+| ----------------------------- | ------------------------------------------------------------------- |
+| 🎤 **Controles de Voz**       | Entrar/sair de canais, mutar/ensurdecer                             |
+| 📢 **Navegação de Canais**    | Navegar servidores, canais e ver membros online                     |
+| 🔊 **Controle de Volume**     | Ajuste de volume por usuário com memória                            |
+| ⏱️ **Tempo na Call**          | Veja quanto tempo você está na chamada                              |
+| 🎮 **Atividade de Jogo**      | Atualiza automaticamente o status do Discord com o jogo Steam atual |
+| 🔔 **Toggle de Notificações** | Desative notificações durante jogos                                 |
+| 🔗 **Auto-Conectar**          | Conecte automaticamente ao Discord ao iniciar                       |
+| 🌐 **Multi-Idioma**           | Suporte a Inglês e Português                                        |
+| 🎨 **Tema Discord**           | Interface bonita inspirada no Discord                               |
 
 ### 📸 Capturas de Tela
 

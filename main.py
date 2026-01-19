@@ -1,5 +1,6 @@
 import os
 import json
+import ssl
 import struct
 import socket
 import secrets
@@ -7,7 +8,11 @@ import subprocess
 import asyncio
 import threading
 import time
-from typing import Optional, Dict, List, Callable
+import glob
+import re
+import urllib.request
+import urllib.error
+from typing import Optional, Dict, List, Callable, Any
 from queue import Queue, Empty
 
 # The decky plugin module is located at decky-loader/plugin
@@ -264,6 +269,16 @@ class DiscordRPC:
         result = self.send_command("SET_ACTIVITY", {"pid": os.getpid(), "activity": activity})
         return result is not None
     
+    def clear_activity(self) -> bool:
+        """Limpa o status/atividade do usuário"""
+        result = self.send_command("SET_ACTIVITY", {"pid": os.getpid(), "activity": None})
+        return result is not None
+    
+    def clear_activity(self) -> bool:
+        """Limpa o status/atividade do usuário"""
+        result = self.send_command("SET_ACTIVITY", {"pid": os.getpid(), "activity": None})
+        return result is not None
+    
     def subscribe(self, event: str, args: dict = None) -> bool:
         """Inscreve-se em um evento do Discord"""
         payload = {"cmd": "SUBSCRIBE", "evt": event, "nonce": secrets.token_hex(16)}
@@ -361,7 +376,19 @@ class Plugin:
     voice_polling_thread: Optional[threading.Thread] = None
     event_queue: Queue = Queue()
     last_poll_time: float = 0
-    poll_interval: float = 3.0  # Segundos entre polls
+    poll_interval: float = 5.0  # Segundos entre polls
+    
+    # Sistema de detecção de jogos Steam
+    game_sync_enabled: bool = True
+    current_game_appid: Optional[str] = None
+    current_game_name: Optional[str] = None
+    game_start_time: Optional[int] = None
+    current_game_rpc: Optional[Any] = None  # Conexão RPC com App ID oficial
+    
+    # Cache de aplicativos detectáveis do Discord
+    discord_detectable_apps: List[Dict] = []
+    discord_apps_last_fetch: float = 0
+    discord_apps_cache_duration: float = 86400  # 24 horas
     
     def get_token_path(self) -> str:
         return os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "discord_token.json")
@@ -410,6 +437,283 @@ class Plugin:
             pass
         return {}
     
+    # ==================== STEAM GAME DETECTION ====================
+    
+    def get_steam_game_info(self) -> Optional[Dict]:
+        """Detecta o jogo Steam em execução e retorna informações"""
+        try:
+            found_games = []
+            
+            # Procurar por processos reaper (Steam game launcher)
+            for proc_dir in glob.glob('/proc/[0-9]*'):
+                try:
+                    cmdline_path = os.path.join(proc_dir, 'cmdline')
+                    if not os.path.exists(cmdline_path):
+                        continue
+                    
+                    with open(cmdline_path, 'r') as f:
+                        cmdline = f.read()
+                    
+                    # Procurar por SteamLaunch AppId=XXXXX
+                    match = re.search(r'SteamLaunch.*?AppId=(\d+)', cmdline)
+                    if match:
+                        appid = match.group(1)
+                        
+                        # Ignorar o Discord (AppId comum: 3975918012 ou similar)
+                        # Discord no Flatpak geralmente tem AppId muito alto
+                        if 'discord' in cmdline.lower() or 'flatpak' in cmdline.lower():
+                            continue
+                        
+                        found_games.append(appid)
+                except (IOError, PermissionError):
+                    continue
+            
+            # Pegar o primeiro jogo real encontrado
+            if found_games:
+                appid = found_games[0]
+                
+                # Tentar ler o nome do jogo do arquivo de manifesto
+                game_name = self.get_game_name_from_appid(appid)
+                if not game_name:
+                    game_name = f"Game {appid}"
+                
+                return {
+                    "appid": appid,
+                    "name": game_name,
+                    "image_url": f"https://steamcdn-a.akamaihd.net/steam/apps/{appid}/header.jpg"
+                }
+            
+            return None
+        except Exception as e:
+            decky.logger.error(f"Discord Lite: Erro ao detectar jogo Steam: {e}")
+            return None
+    
+    def get_game_name_from_appid(self, appid: str) -> Optional[str]:
+        """Tenta obter o nome do jogo a partir do AppID"""
+        try:
+            # Procurar em locais comuns do Steam
+            steam_paths = [
+                "/home/deck/.local/share/Steam/steamapps",
+                "/home/deck/.steam/steam/steamapps",
+                "/run/media/*/steamapps"
+            ]
+            
+            for base_path in steam_paths:
+                manifest_files = glob.glob(f"{base_path}/appmanifest_{appid}.acf")
+                for manifest_path in manifest_files:
+                    try:
+                        with open(manifest_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                            # Procurar por "name" "Game Name"
+                            match = re.search(r'"name"\s+"([^"]+)"', content)
+                            if match:
+                                return match.group(1)
+                    except:
+                        continue
+            
+            return None
+        except Exception as e:
+            decky.logger.error(f"Discord Lite: Erro ao obter nome do jogo: {e}")
+            return None
+    
+    def get_cache_path(self) -> str:
+        return os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "discord_apps_cache.json")
+
+    def load_discord_detectable_apps(self):
+        """Carrega lista de aplicativos detectáveis do Discord (com cache de 24h persistente)"""
+        try:
+            import ssl
+            
+            current_time = time.time()
+            
+            # 1. Verificar cache em memória
+            if self.discord_detectable_apps and (current_time - self.discord_apps_last_fetch) < self.discord_apps_cache_duration:
+                return self.discord_detectable_apps
+            
+            # 2. Verificar cache em disco (se memória estiver vazia ou expirada)
+            cache_path = self.get_cache_path()
+            if os.path.exists(cache_path):
+                try:
+                    with open(cache_path, 'r') as f:
+                        cache_data = json.load(f)
+                        last_fetch = cache_data.get("last_fetch", 0)
+                        
+                        if (current_time - last_fetch) < self.discord_apps_cache_duration:
+                            self.discord_detectable_apps = cache_data.get("apps", [])
+                            self.discord_apps_last_fetch = last_fetch
+                            decky.logger.info(f"Discord Lite: Carregados {len(self.discord_detectable_apps)} apps do cache em disco")
+                            return self.discord_detectable_apps
+                except Exception as e:
+                    decky.logger.warning(f"Discord Lite: Erro ao ler cache em disco: {e}")
+            
+            # 3. Buscar da API do Discord (se cache inválido)
+            decky.logger.info("Discord Lite: Buscando lista de apps detectáveis do Discord (Web)...")
+            req = urllib.request.Request(
+                "https://discord.com/api/v10/applications/detectable",
+                headers={"User-Agent": "DiscordLite/1.0"}
+            )
+            
+            # Criar contexto SSL que não verifica certificados (necessário no Steam Deck)
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            
+            with urllib.request.urlopen(req, timeout=10, context=ctx) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                self.discord_detectable_apps = data
+                self.discord_apps_last_fetch = current_time
+                
+                # Salvar em disco
+                try:
+                    os.makedirs(decky.DECKY_PLUGIN_SETTINGS_DIR, exist_ok=True)
+                    with open(cache_path, 'w') as f:
+                        json.dump({
+                            "last_fetch": current_time,
+                            "apps": data
+                        }, f)
+                    decky.logger.info(f"Discord Lite: Cache salvo em disco com {len(data)} apps")
+                except Exception as e:
+                    decky.logger.error(f"Discord Lite: Erro ao salvar cache em disco: {e}")
+                
+                return data
+        
+        except Exception as e:
+            decky.logger.error(f"Discord Lite: Erro ao buscar apps detectáveis: {e}")
+            return self.discord_detectable_apps  # Retornar cache antigo se houver
+    
+    def find_discord_app_id(self, game_name: str) -> Optional[str]:
+        """Busca o App ID oficial do Discord para um jogo pelo nome"""
+        try:
+            decky.logger.info(f"Discord Lite: Buscando App ID oficial para: {game_name}")
+            apps = self.load_discord_detectable_apps()
+            
+            if not apps:
+                decky.logger.warning("Discord Lite: Nenhum app detectável carregado")
+                return None
+            
+            # Buscar match exato primeiro
+            for app in apps:
+                if app.get("name", "").lower() == game_name.lower():
+                    app_id = app.get("id")
+                    decky.logger.info(f"Discord Lite: Match exato encontrado! App ID: {app_id}")
+                    return app_id
+            
+            # Buscar match parcial (contém)
+            for app in apps:
+                app_name = app.get("name", "").lower()
+                if game_name.lower() in app_name or app_name in game_name.lower():
+                    app_id = app.get("id")
+                    decky.logger.info(f"Discord Lite: Match parcial encontrado! {app_name} → App ID: {app_id}")
+                    return app_id
+            
+            decky.logger.info(f"Discord Lite: Nenhum App ID oficial encontrado para {game_name}")
+            return None
+        except Exception as e:
+            decky.logger.error(f"Discord Lite: Erro ao buscar App ID do Discord: {e}")
+            return None
+    
+    def sync_game_to_discord(self):
+        """Sincroniza o jogo atual com o status do Discord"""
+        if not self.rpc or not self.game_sync_enabled:
+            return
+        
+        try:
+            game_info = self.get_steam_game_info()
+            
+            # Se mudou o jogo
+            if game_info and game_info["appid"] != self.current_game_appid:
+                self.current_game_appid = game_info["appid"]
+                self.current_game_name = game_info["name"]
+                self.game_start_time = int(time.time())
+                
+                # Buscar App ID oficial do Discord para este jogo
+                discord_app_id = self.find_discord_app_id(game_info["name"])
+                
+                # Definir textos da presença
+                details = game_info["name"]
+                state = "Playing on Steam Deck"
+                
+                # Se for usar app ID oficial, o nome do jogo já aparece no título
+                if discord_app_id:
+                    details = "Playing on Steam Deck"
+                    state = None
+                
+                # Atualizar Rich Presence no Discord
+                activity = {
+                    "details": details,
+                    "timestamps": {
+                        "start": self.game_start_time
+                    },
+                    "assets": {
+                        "large_image": game_info["image_url"],
+                        "large_text": game_info["name"],
+                        "small_image": "https://steamcdn-a.akamaihd.net/steamcommunity/public/images/avatars/8d/8dd66ce1b9590825cebdce861c372cc3f5187f2e_full.jpg",
+                        "small_text": "Steam Deck"
+                    }
+                }
+                
+                # Adicionar state apenas se definido
+                if state:
+                    activity["state"] = state
+                
+                # Se encontrou App ID oficial, tentar usar ele
+                if discord_app_id:
+                    try:
+                        decky.logger.info(f"Discord Lite: App ID oficial encontrado para {game_info['name']}: {discord_app_id}")
+                        # Criar nova conexão RPC com o App ID oficial
+                        official_rpc = DiscordRPC(discord_app_id)
+                        if official_rpc.connect():
+                            official_rpc.set_activity(activity)
+                            
+                            # Fechar conexão anterior e usar a nova
+                            if hasattr(self, 'current_game_rpc') and self.current_game_rpc:
+                                try:
+                                    if self.current_game_rpc.socket:
+                                        self.current_game_rpc.socket.close()
+                                except:
+                                    pass
+                            
+                            self.current_game_rpc = official_rpc
+                            
+                            # Limpar atividade do cliente principal para evitar duplicidade
+                            try:
+                                self.rpc.clear_activity()
+                            except:
+                                pass
+                                
+                            decky.logger.info(f"Discord Lite: Sincronizado jogo com App ID oficial: {game_info['name']}")
+                        else:
+                            raise Exception("Falha ao conectar RPC oficial")
+                    except Exception as e:
+                        decky.logger.warning(f"Discord Lite: Erro ao usar App ID oficial, usando fallback: {e}")
+                        # Fallback: usar nosso App ID
+                        self.rpc.set_activity(activity)
+                        decky.logger.info(f"Discord Lite: Sincronizado jogo (fallback): {game_info['name']}")
+                else:
+                    # Usar nosso App ID (Deckord)
+                    self.rpc.set_activity(activity)
+                    decky.logger.info(f"Discord Lite: Sincronizado jogo: {game_info['name']}")
+            
+            # Se não há jogo rodando mas tinha antes
+            elif not game_info and self.current_game_appid:
+                self.current_game_appid = None
+                self.current_game_name = None
+                self.game_start_time = None
+                
+                # Fechar conexão do jogo se existir
+                if hasattr(self, 'current_game_rpc') and self.current_game_rpc:
+                    try:
+                        self.current_game_rpc.close()
+                        self.current_game_rpc = None
+                    except:
+                        pass
+                
+                self.rpc.clear_activity()
+                decky.logger.info("Discord Lite: Jogo fechado, status limpo")
+        
+        except Exception as e:
+            decky.logger.error(f"Discord Lite: Erro ao sincronizar jogo: {e}")
+    
     # ==================== SETTINGS API ====================
     
     async def get_settings(self) -> dict:
@@ -422,6 +726,7 @@ class Plugin:
                 "auto_connect": settings.get("auto_connect", False),
                 "language": settings.get("language", "pt"),
                 "user_volumes": settings.get("user_volumes", {}),
+                "game_sync_enabled": settings.get("game_sync_enabled", True),
             }
         }
     
@@ -429,6 +734,17 @@ class Plugin:
         """Salva as configurações do plugin"""
         try:
             self.save_settings(settings)
+            
+            # Se mudou game_sync_enabled
+            if "game_sync_enabled" in settings:
+                self.game_sync_enabled = settings["game_sync_enabled"]
+                if not self.game_sync_enabled and self.rpc:
+                    # Limpar status do Discord
+                    self.rpc.clear_activity()
+                    self.current_game_appid = None
+                    self.current_game_name = None
+                    self.game_start_time = None
+            
             return {"success": True}
         except Exception as e:
             return {"success": False, "message": str(e)}
@@ -438,6 +754,7 @@ class Plugin:
         self.load_token()
         settings = self.load_settings()
         self.selected_guild_id = settings.get("selected_guild_id")
+        self.game_sync_enabled = settings.get("game_sync_enabled", True)
     
     async def _unload(self):
         decky.logger.info("Discord Lite: Descarregando...")
@@ -489,6 +806,8 @@ class Plugin:
             try:
                 if self.rpc and self.rpc.authenticated:
                     self._check_voice_members_changes()
+                    # Sincronizar jogo Steam com Discord
+                    self.sync_game_to_discord()
             except Exception as e:
                 decky.logger.error(f"Discord Lite: Erro no polling: {e}")
             
@@ -1091,5 +1410,10 @@ class Plugin:
             "automatic_gain_control": self.rpc.automatic_gain_control,
             "guilds": self.guilds_cache,
             "selected_guild_id": self.selected_guild_id,
+            "game_sync_enabled": self.game_sync_enabled,
+            "current_game": {
+                "appid": self.current_game_appid,
+                "name": self.current_game_name
+            } if self.current_game_appid else None,
         }
 

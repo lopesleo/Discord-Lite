@@ -72,6 +72,8 @@ const translations = {
     autoConnect: "Auto-connect",
     autoConnectDesc: "Connect automatically when Discord is open",
     language: "Language",
+    steamSync: "Steam Game Sync",
+    steamSyncDesc: "Show current game in Discord status",
 
     // Call time
     inCall: "In call",
@@ -142,6 +144,8 @@ const translations = {
     autoConnect: "Auto-conectar",
     autoConnectDesc: "Conectar automaticamente quando Discord estiver aberto",
     language: "Idioma",
+    steamSync: "Sincronizar Jogo Steam",
+    steamSyncDesc: "Mostrar jogo atual no status do Discord",
 
     // Call time
     inCall: "Na call",
@@ -241,6 +245,7 @@ interface SettingsResponse {
   settings: {
     notifications_enabled?: boolean;
     auto_connect?: boolean;
+    game_sync_enabled?: boolean;
     language?: Language;
     user_volumes?: Record<string, number>;
   };
@@ -399,21 +404,31 @@ const styles = {
   },
 
   // Control Buttons
-  controlButton: (active: boolean) => ({
+  controlButton: (
+    active: boolean,
+    focused: boolean = false,
+    disabled: boolean = false,
+  ) => ({
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     gap: theme.spacing.sm,
     padding: `${theme.spacing.md} ${theme.spacing.lg}`,
-    backgroundColor: active
-      ? "rgba(59, 165, 92, 0.2)"
-      : theme.colors.background.tertiary,
+    backgroundColor: disabled
+      ? "rgba(128, 128, 128, 0.1)"
+      : active
+        ? "rgba(59, 165, 92, 0.2)"
+        : theme.colors.background.tertiary,
     borderRadius: theme.borderRadius.md,
-    cursor: "pointer",
+    cursor: disabled ? "not-allowed" : "pointer",
     transition: "all 0.15s ease",
-    border: active
-      ? `1px solid ${theme.colors.success}`
-      : `1px solid ${theme.colors.border}`,
+    border: focused
+      ? `2px solid ${theme.colors.primary}`
+      : active
+        ? `2px solid ${theme.colors.success}`
+        : `2px solid ${theme.colors.border}`,
+    boxShadow: focused ? `0 0 8px rgba(88, 101, 242, 0.5)` : "none",
+    opacity: disabled ? 0.5 : 1,
   }),
 
   // Member Items
@@ -795,6 +810,7 @@ function Content() {
   // Settings
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [autoConnectEnabled, setAutoConnectEnabled] = useState(false);
+  const [steamSyncEnabled, setSteamSyncEnabled] = useState(true);
   const [userVolumes, setUserVolumes] = useState<Record<string, number>>({});
 
   // Auth state
@@ -842,6 +858,7 @@ function Content() {
             result.settings.notifications_enabled ?? true,
           );
           setAutoConnectEnabled(result.settings.auto_connect ?? false);
+          setSteamSyncEnabled(result.settings.game_sync_enabled ?? true);
           setLanguage(result.settings.language ?? "pt");
           setUserVolumes(result.settings.user_volumes ?? {});
         }
@@ -1125,6 +1142,11 @@ function Content() {
     await saveSettings({ auto_connect: enabled });
   };
 
+  const handleSteamSyncChange = async (enabled: boolean) => {
+    setSteamSyncEnabled(enabled);
+    await saveSettings({ game_sync_enabled: enabled });
+  };
+
   const handleLanguageChange = async (lang: Language) => {
     setLanguage(lang);
     await saveSettings({ language: lang });
@@ -1255,16 +1277,36 @@ function Content() {
       <PanelSection title={`🎤 ${t("controls")}`}>
         <PanelSectionRow>
           <Focusable
-            style={styles.controlButton(!voiceState?.is_muted)}
-            onActivate={handleToggleMute}
+            style={styles.controlButton(
+              !voiceState?.is_muted && !voiceState?.is_deafened,
+              false,
+              voiceState?.is_deafened || false,
+            )}
+            onActivate={() => {
+              if (!voiceState?.is_deafened) {
+                handleToggleMute();
+              }
+            }}
+            onFocus={(e) => {
+              const btn = e.currentTarget as HTMLElement;
+              btn.style.border = `2px solid ${theme.colors.primary}`;
+              btn.style.boxShadow = `0 0 8px rgba(88, 101, 242, 0.5)`;
+            }}
+            onBlur={(e) => {
+              const btn = e.currentTarget as HTMLElement;
+              const active = !voiceState?.is_muted && !voiceState?.is_deafened;
+              btn.style.border = active
+                ? `2px solid ${theme.colors.success}`
+                : `2px solid ${theme.colors.border}`;
+              btn.style.boxShadow = "none";
+            }}
           >
-            <div
-              onClick={handleToggleMute}
-              style={{ width: "100%", textAlign: "center" }}
-            >
-              {voiceState?.is_muted
-                ? `🔇 ${t("muted")}`
-                : `🎤 ${t("micActive")}`}
+            <div style={{ width: "100%", textAlign: "center" }}>
+              {voiceState?.is_deafened
+                ? `🔇 ${t("muted")} (${t("deafened")})`
+                : voiceState?.is_muted
+                  ? `🔇 ${t("muted")}`
+                  : `🎤 ${t("micActive")}`}
             </div>
           </Focusable>
         </PanelSectionRow>
@@ -1273,11 +1315,21 @@ function Content() {
           <Focusable
             style={styles.controlButton(!voiceState?.is_deafened)}
             onActivate={handleToggleDeafen}
+            onFocus={(e) => {
+              const btn = e.currentTarget as HTMLElement;
+              btn.style.border = `2px solid ${theme.colors.primary}`;
+              btn.style.boxShadow = `0 0 8px rgba(88, 101, 242, 0.5)`;
+            }}
+            onBlur={(e) => {
+              const btn = e.currentTarget as HTMLElement;
+              const active = !voiceState?.is_deafened;
+              btn.style.border = active
+                ? `2px solid ${theme.colors.success}`
+                : `2px solid ${theme.colors.border}`;
+              btn.style.boxShadow = "none";
+            }}
           >
-            <div
-              onClick={handleToggleDeafen}
-              style={{ width: "100%", textAlign: "center" }}
-            >
+            <div style={{ width: "100%", textAlign: "center" }}>
               {voiceState?.is_deafened
                 ? `🔇 ${t("deafened")}`
                 : `🔊 ${t("audioActive")}`}
@@ -1533,6 +1585,15 @@ function Content() {
                 description={t("autoConnectDesc")}
                 checked={autoConnectEnabled}
                 onChange={handleAutoConnectChange}
+              />
+            </PanelSectionRow>
+
+            <PanelSectionRow>
+              <ToggleField
+                label={t("steamSync")}
+                description={t("steamSyncDesc")}
+                checked={steamSyncEnabled}
+                onChange={handleSteamSyncChange}
               />
             </PanelSectionRow>
 
