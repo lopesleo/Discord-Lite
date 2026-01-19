@@ -1,78 +1,104 @@
-# Discord Lite - Deploy Script for Steam Deck
-# Usage: .\deploy.ps1
-# Optional: .\deploy.ps1 -SkipBuild  (to deploy without rebuilding)
+# Script para criar o arquivo zip do plugin para Decky Loader
+# Uso: .\create-zip.ps1 [-Version "v1.0.0"]
 
 param(
-    [switch]$SkipBuild
+    [Parameter(Mandatory=$false)]
+    [string]$Version = "v1.0.0"
 )
 
-# Configuration
-$DECK_IP = "192.168.1.129"
-$DECK_USER = "deck"
-$DECK_PORT = "22"
-$PLUGIN_NAME = "Discord-Lite"
-$PLUGIN_PATH = "/home/deck/homebrew/plugins/$PLUGIN_NAME"
+$ErrorActionPreference = "Stop"
 
-# Colors for output
-function Write-ColorOutput($Color, $Message) {
-    Write-Host $Message -ForegroundColor $Color
+# --- CONFIGURAÇÕES ---
+# Nome da pasta que ficará DENTRO do zip (importante para o Decky)
+$PluginFolder = "DiscordLite" 
+# Nome do arquivo final
+$ZipFile = "Discord-Lite-$Version.zip"
+
+Write-Host " Building package for $PluginFolder ($Version)..." -ForegroundColor Cyan
+
+# Definir caminhos
+$ZipPath = Join-Path $PSScriptRoot $ZipFile
+$TempRoot = Join-Path $PSScriptRoot "temp_release"
+$TargetDir = Join-Path $TempRoot $PluginFolder
+
+# 1. Limpeza inicial
+# Remover zip antigo
+if (Test-Path $ZipPath) {
+    Remove-Item $ZipPath -Force
+    Write-Host " [OK] Old zip removed" -ForegroundColor DarkGray
 }
 
-Write-ColorOutput Cyan "=========================================="
-Write-ColorOutput Cyan "   Discord Lite - Deploy to Steam Deck"
-Write-ColorOutput Cyan "=========================================="
-Write-Host ""
+# Recriar pasta temporária limpa (temp_release/DiscordLite)
+if (Test-Path $TempRoot) { Remove-Item $TempRoot -Recurse -Force }
+New-Item -ItemType Directory -Path $TargetDir | Out-Null
 
-# Step 1: Build (unless skipped)
-if (-not $SkipBuild) {
-    Write-ColorOutput Yellow "[1/4] Building plugin..."
-    pnpm run build
-    if ($LASTEXITCODE -ne 0) {
-        Write-ColorOutput Red "Build failed!"
-        exit 1
+Write-Host " Copying files..." -ForegroundColor Yellow
+
+# 2. Copiar Arquivos da Raiz
+$files = @('main.py', 'plugin.json', 'package.json', 'README.md', 'LICENSE')
+foreach ($file in $files) {
+    if (Test-Path $file) {
+        Copy-Item $file -Destination $TargetDir
+        Write-Host "   + $file" -ForegroundColor Gray
+    } else {
+        Write-Host "   ! $file not found (Skipping)" -ForegroundColor DarkYellow
     }
-    Write-ColorOutput Green "Build successful!"
-} else {
-    Write-ColorOutput Yellow "[1/4] Skipping build..."
 }
 
-# Step 2: Test SSH connection
-Write-ColorOutput Yellow "[2/4] Testing connection to Steam Deck..."
-$sshTest = ssh -o ConnectTimeout=5 -o BatchMode=yes "${DECK_USER}@${DECK_IP}" "echo OK" 2>&1
-if ($sshTest -ne "OK") {
-    Write-ColorOutput Red "Cannot connect to Steam Deck at $DECK_IP"
-    Write-ColorOutput Red "Make sure:"
-    Write-ColorOutput Red "  1. Steam Deck is on and connected to the network"
-    Write-ColorOutput Red "  2. SSH is enabled (Settings > Developer Options)"
-    Write-ColorOutput Red "  3. SSH key is configured or you'll need to enter password"
-    Write-Host ""
-    Write-ColorOutput Yellow "Trying with password authentication..."
+# 3. Copiar Pastas (Assets, Dist, Defaults)
+$folders = @('dist', 'defaults', 'assets')
+foreach ($folder in $folders) {
+    if (Test-Path $folder) {
+        Copy-Item $folder -Destination $TargetDir -Recurse -Force
+        $count = (Get-ChildItem "$TargetDir\$folder" -Recurse -File).Count
+        Write-Host "   + $folder/ ($count files)" -ForegroundColor Gray
+    }
 }
 
-# Step 3: Deploy files
-Write-ColorOutput Yellow "[3/4] Deploying files to Steam Deck..."
+# 4. Copiar Libs (com limpeza de lixo)
+if (Test-Path "lib") {
+    Copy-Item "lib" -Destination $TargetDir -Recurse -Force
+    
+    # Remover __pycache__, .pyc, .DS_Store, etc.
+    $removedCount = 0
+    Get-ChildItem -Path "$TargetDir\lib" -Recurse -Force | Where-Object { 
+        $_.Name -eq '__pycache__' -or 
+        $_.Extension -eq '.pyc' -or 
+        $_.Name -eq '.DS_Store' -or
+        $_.Name -eq 'Thumbs.db'
+    } | ForEach-Object {
+        Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        $removedCount++
+    }
+    
+    $libCount = (Get-ChildItem "$TargetDir\lib" -Recurse -File).Count
+    Write-Host "   + lib/ ($libCount files, cleaned $removedCount temp items)" -ForegroundColor Gray
+}
 
-# Create temp directory on deck
-ssh "${DECK_USER}@${DECK_IP}" "mkdir -p /tmp/discord-lite-deploy"
+# 5. Compactação
+Write-Host ""
+Write-Host " Compressing..." -ForegroundColor Yellow
 
-# Copy all files to temp directory
-Write-ColorOutput Cyan "  Copying files to Steam Deck..."
-scp -r "dist" "main.py" "plugin.json" "package.json" "lib" "defaults" "${DECK_USER}@${DECK_IP}:/tmp/discord-lite-deploy/"
+# Compacta o conteúdo de temp_release (que contem a pasta DiscordLite)
+# Isso garante que ao abrir o zip, o usuário veja a pasta, e não os arquivos soltos.
+Compress-Archive -Path "$TempRoot\*" -DestinationPath $ZipPath -CompressionLevel Optimal -Force
 
-# Run all sudo commands in a single SSH session (only one password prompt)
-Write-ColorOutput Cyan "  Installing plugin..."
-ssh -t "${DECK_USER}@${DECK_IP}" "sudo systemctl stop plugin_loader 2>/dev/null || true; sudo rm -rf $PLUGIN_PATH; sudo mkdir -p $PLUGIN_PATH; sudo cp -r /tmp/discord-lite-deploy/* $PLUGIN_PATH/; sudo chown -R deck:deck $PLUGIN_PATH; sudo chmod -R 755 $PLUGIN_PATH; rm -rf /tmp/discord-lite-deploy; echo 'Plugin installed!'"
+# 6. Limpeza Final
+Remove-Item $TempRoot -Recurse -Force
 
-Write-ColorOutput Green "Files deployed!"
-
-# Step 4: Restart Decky Loader
-Write-ColorOutput Yellow "[4/4] Restarting Decky Loader..."
-ssh -t "${DECK_USER}@${DECK_IP}" "sudo systemctl start plugin_loader"
+# 7. Relatório
+$ZipInfo = Get-Item $ZipPath
+$SizeMB = [math]::Round($ZipInfo.Length / 1MB, 2)
 
 Write-Host ""
-Write-ColorOutput Green "=========================================="
-Write-ColorOutput Green "   Deploy Complete!"
-Write-ColorOutput Green "=========================================="
-Write-ColorOutput Cyan "Plugin deployed to: $PLUGIN_PATH"
-Write-ColorOutput Cyan "Steam Deck IP: $DECK_IP"
-Write-Host ""
+Write-Host "SUCCESS! Package created." -ForegroundColor Green
+Write-Host "---------------------------------------------------" -ForegroundColor DarkGray
+Write-Host " File:  $ZipFile"
+Write-Host " Path:  $ZipPath"
+Write-Host " Size:  $SizeMB MB"
+Write-Host "---------------------------------------------------" -ForegroundColor DarkGray
+Write-Host "INSTALLATION:" -ForegroundColor Cyan
+Write-Host " 1. Copy zip to Steam Deck."
+Write-Host " 2. Extract into: ~/homebrew/plugins/"
+Write-Host "    (The zip already contains the '$PluginFolder' folder)"
+Write-Host ""Write-Host " Done!" -ForegroundColor Green
