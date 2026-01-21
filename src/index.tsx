@@ -436,7 +436,6 @@ const styles = {
     backgroundColor: theme.colors.background.tertiary,
     borderRadius: theme.borderRadius.md,
     marginBottom: theme.spacing.xs,
-    overflow: "hidden",
     border: `1px solid transparent`,
     transition: "all 0.15s ease",
   },
@@ -456,6 +455,14 @@ const styles = {
     justifyContent: "space-between",
     padding: theme.spacing.md,
     cursor: "pointer",
+    borderRadius: theme.borderRadius.md,
+    border: "2px solid transparent", // Borda invisível por padrão para não pular layout
+    transition: "all 0.2s ease",
+  },
+
+  memberHeaderFocused: {
+    backgroundColor: "rgba(255, 255, 255, 0.1)", // Um brilho de fundo
+    border: "2px solid white", // A borda branca clássica do Steam Deck
   },
 
   memberAvatar: {
@@ -645,7 +652,18 @@ function MemberItem({
     savedVolume ?? member.volume ?? 100,
   );
   const [isMuted, setIsMuted] = useState(member.mute);
-  const [isFocused, setIsFocused] = useState(false);
+
+  // NOVO: Estado de foco visual APENAS para o cabeçalho
+  const [headerFocused, setHeaderFocused] = useState(false);
+
+  // Sincronização com o Backend
+  useEffect(() => {
+    setLocalVolume(savedVolume ?? member.volume ?? 100);
+  }, [savedVolume, member.volume]);
+
+  useEffect(() => {
+    setIsMuted(member.mute);
+  }, [member.mute]);
 
   const handleVolumeChange = useCallback(
     (value: number) => {
@@ -679,13 +697,16 @@ function MemberItem({
   };
 
   return (
-    <Focusable
-      style={isFocused ? styles.memberItemFocused : styles.memberItem}
-      onActivate={onToggleExpand}
-      onFocus={() => setIsFocused(true)}
-      onBlur={() => setIsFocused(false)}
-    >
-      <div onClick={onToggleExpand} style={styles.memberHeader}>
+    <div style={styles.memberItem}>
+      <Focusable
+        onActivate={onToggleExpand}
+        onFocus={() => setHeaderFocused(true)}
+        onBlur={() => setHeaderFocused(false)}
+        style={{
+          ...styles.memberHeader,
+          ...(headerFocused ? styles.memberHeaderFocused : {}),
+        }}
+      >
         <div style={{ display: "flex", alignItems: "center" }}>
           <div style={{ position: "relative" as const }}>
             {avatarUrl ? (
@@ -704,17 +725,13 @@ function MemberItem({
             </span>
           </div>
         </div>
-        <span
-          style={{
-            color: isFocused ? theme.colors.primary : theme.colors.text.muted,
-          }}
-        >
+        <span style={{ color: theme.colors.text.muted }}>
           {expanded ? "▲" : "▼"}
         </span>
-      </div>
+      </Focusable>
 
       {expanded && (
-        <Focusable style={styles.memberControls}>
+        <div style={styles.memberControls}>
           <SliderField
             label={`${t("userVolume")}: ${localVolume}%`}
             value={localVolume}
@@ -724,14 +741,15 @@ function MemberItem({
             onChange={handleVolumeChange}
             showValue={false}
           />
+
           <div style={{ marginTop: theme.spacing.sm }}>
             <ButtonItem layout="below" onClick={handleMuteToggle}>
               {isMuted ? `🔊 ${t("unmuteUser")}` : `🔇 ${t("muteUser")}`}
             </ButtonItem>
           </div>
-        </Focusable>
+        </div>
       )}
-    </Focusable>
+    </div>
   );
 }
 
@@ -798,7 +816,7 @@ function ChannelItem({ channel, selected, onSelect }: ChannelItemProps) {
 }
 
 // ==================== MAIN COMPONENT ====================
-
+let globalCallStartTime: number | null = null;
 function Content() {
   // Language
   const [language, setLanguage] = useState<Language>("pt");
@@ -829,8 +847,11 @@ function Content() {
   const [voiceState, setVoiceState] = useState<VoiceStateResponse | null>(null);
   const [expandedMember, setExpandedMember] = useState<string | null>(null);
 
+  // Focus states for control buttons
+  const [muteFocused, setMuteFocused] = useState(false);
+  const [deafenFocused, setDeafenFocused] = useState(false);
+
   // Call timer
-  const [callStartTime, setCallStartTime] = useState<number | null>(null);
   const [callDuration, setCallDuration] = useState(0);
 
   // Servers & Channels
@@ -869,26 +890,34 @@ function Content() {
     loadSettingsData();
   }, []);
 
-  // ==================== CALL TIMER ====================
+  // ==================== CALL TIMER (CORRIGIDO) ====================
 
   useEffect(() => {
-    if (voiceState?.in_voice && !callStartTime) {
-      setCallStartTime(Date.now());
-    } else if (!voiceState?.in_voice && callStartTime) {
-      setCallStartTime(null);
+    if (voiceState?.in_voice) {
+      if (!globalCallStartTime) {
+        globalCallStartTime = Date.now();
+      }
+    } else {
+      globalCallStartTime = null;
       setCallDuration(0);
     }
-  }, [voiceState?.in_voice, callStartTime]);
+  }, [voiceState?.in_voice]);
 
   useEffect(() => {
-    if (!callStartTime) return;
+    if (!voiceState?.in_voice || !globalCallStartTime) return;
 
-    const interval = setInterval(() => {
-      setCallDuration(Math.floor((Date.now() - callStartTime) / 1000));
-    }, 1000);
+    const updateTime = () => {
+      if (globalCallStartTime) {
+        setCallDuration(Math.floor((Date.now() - globalCallStartTime) / 1000));
+      }
+    };
+
+    updateTime();
+
+    const interval = setInterval(updateTime, 1000);
 
     return () => clearInterval(interval);
-  }, [callStartTime]);
+  }, [voiceState?.in_voice]);
 
   // ==================== HANDLERS ====================
 
@@ -924,54 +953,86 @@ function Content() {
     }
   }, [language]);
 
-  // ==================== INITIAL CHECK ====================
+  // ==================== INITIAL CHECK & POLLING ====================
 
   useEffect(() => {
-    const init = async () => {
+    let intervalId: ReturnType<typeof setInterval>;
+
+    const checkStatusLoop = async () => {
       try {
-        const installed = await checkDiscordInstalled();
-        setDiscordInstalled(installed.installed || false);
+        // 1. Verifica se está instalado (só precisa confirmar uma vez se for true)
+        if (!discordInstalled) {
+          const installed = await checkDiscordInstalled();
+          setDiscordInstalled(installed.installed || false);
+          // Se não estiver instalado, nem continua
+          if (!installed.installed) return;
+        }
 
+        // 2. Verifica se está rodando
         const running = await checkDiscordRunning();
-        setDiscordRunning(running.running || false);
+        const isRunning = running.running || false;
+        setDiscordRunning(isRunning);
 
-        if (running.running) {
-          const status = await checkStatus();
-          if (status.authenticated) {
-            setIsAuthenticated(true);
-            setUsername(status.user?.username || "");
-            setStatusMessage(
-              `${translations[language].connectedAs} ${status.user?.username || ""}`,
-            );
-
-            const voice = await getVoiceState();
-            if (voice.success) setVoiceState(voice);
-
-            const guildsRes = await getGuilds();
-            if (guildsRes.success) {
-              setGuilds(guildsRes.guilds);
-              setSelectedGuildId(guildsRes.selected_guild_id || null);
-            }
+        // 3. Se estiver rodando, tenta pegar o status da autenticação
+        if (isRunning) {
+          // Se já estamos autenticados, apenas atualiza o status
+          if (isAuthenticated) {
+            // Opcional: Atualizar info do usuário se necessário
           } else {
-            // Auto-connect if enabled
-            const settings = await getSettings();
-            if (settings.settings?.auto_connect) {
-              handleConnect();
+            // Se não estamos autenticados, verifica se já existe uma sessão válida
+            const status = await checkStatus();
+            if (status.authenticated) {
+              setIsAuthenticated(true);
+              setUsername(status.user?.username || "");
+              setStatusMessage(
+                `${t("connectedAs")} ${status.user?.username || ""}`,
+              );
+
+              // Carrega dados iniciais
+              const voice = await getVoiceState();
+              if (voice.success) setVoiceState(voice);
+              const guildsRes = await getGuilds();
+              if (guildsRes.success) {
+                setGuilds(guildsRes.guilds);
+                setSelectedGuildId(guildsRes.selected_guild_id || null);
+              }
             } else {
-              setStatusMessage(translations[language].connect);
+              // Se não está autenticado, verifica se devemos auto-conectar
+              if (autoConnectEnabled && !isConnecting) {
+                handleConnect();
+              } else {
+                setStatusMessage(t("connect"));
+              }
             }
           }
         } else {
-          setStatusMessage(translations[language].discordNotRunning);
+          setStatusMessage(t("discordNotRunning"));
         }
-      } catch {
-        setStatusMessage(translations[language].error);
+      } catch (e) {
+        console.error("Check status loop error:", e);
       } finally {
         setIsLoading(false);
       }
     };
-    init();
-  }, [language, handleConnect]);
+
+    // Roda imediatamente ao abrir
+    checkStatusLoop();
+
+    // Isso faz o menu "descongelar" assim que você abrir o Discord.
+    if (!discordRunning || !isAuthenticated) {
+      intervalId = setInterval(checkStatusLoop, 3000);
+    }
+
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [
+    language,
+    discordInstalled,
+    discordRunning,
+    isAuthenticated,
+    autoConnectEnabled,
+  ]);
 
   // ==================== VOICE STATE SYNC ====================
 
@@ -1082,13 +1143,29 @@ function Content() {
   };
 
   const handleInputVolume = async (value: number) => {
-    await setInputVolume(Math.round(value));
-    setVoiceState((prev) => (prev ? { ...prev, input_volume: value } : null));
+    const result = await setInputVolume(Math.round(value));
+    if (result.success) {
+      // Usar o volume retornado pelo backend (que foi verificado)
+      setVoiceState((prev) =>
+        prev ? { ...prev, input_volume: result.volume ?? value } : null,
+      );
+    } else {
+      // Reverter para o valor anterior se falhou
+      console.error("Falha ao definir volume de entrada:", result.message);
+    }
   };
 
   const handleOutputVolume = async (value: number) => {
-    await setOutputVolume(Math.round(value));
-    setVoiceState((prev) => (prev ? { ...prev, output_volume: value } : null));
+    const result = await setOutputVolume(Math.round(value));
+    if (result.success) {
+      // Usar o volume retornado pelo backend (que foi verificado)
+      setVoiceState((prev) =>
+        prev ? { ...prev, output_volume: result.volume ?? value } : null,
+      );
+    } else {
+      // Reverter para o valor anterior se falhou
+      console.error("Falha ao definir volume de saída:", result.message);
+    }
   };
 
   const handleSelectGuild = async (guildId: string) => {
@@ -1279,7 +1356,7 @@ function Content() {
           <Focusable
             style={styles.controlButton(
               !voiceState?.is_muted && !voiceState?.is_deafened,
-              false,
+              muteFocused,
               voiceState?.is_deafened || false,
             )}
             onActivate={() => {
@@ -1287,19 +1364,8 @@ function Content() {
                 handleToggleMute();
               }
             }}
-            onFocus={(e) => {
-              const btn = e.currentTarget as HTMLElement;
-              btn.style.border = `2px solid ${theme.colors.primary}`;
-              btn.style.boxShadow = `0 0 8px rgba(88, 101, 242, 0.5)`;
-            }}
-            onBlur={(e) => {
-              const btn = e.currentTarget as HTMLElement;
-              const active = !voiceState?.is_muted && !voiceState?.is_deafened;
-              btn.style.border = active
-                ? `2px solid ${theme.colors.success}`
-                : `2px solid ${theme.colors.border}`;
-              btn.style.boxShadow = "none";
-            }}
+            onFocus={() => setMuteFocused(true)}
+            onBlur={() => setMuteFocused(false)}
           >
             <div style={{ width: "100%", textAlign: "center" }}>
               {voiceState?.is_deafened
@@ -1313,21 +1379,13 @@ function Content() {
 
         <PanelSectionRow>
           <Focusable
-            style={styles.controlButton(!voiceState?.is_deafened)}
+            style={styles.controlButton(
+              !voiceState?.is_deafened,
+              deafenFocused,
+            )}
             onActivate={handleToggleDeafen}
-            onFocus={(e) => {
-              const btn = e.currentTarget as HTMLElement;
-              btn.style.border = `2px solid ${theme.colors.primary}`;
-              btn.style.boxShadow = `0 0 8px rgba(88, 101, 242, 0.5)`;
-            }}
-            onBlur={(e) => {
-              const btn = e.currentTarget as HTMLElement;
-              const active = !voiceState?.is_deafened;
-              btn.style.border = active
-                ? `2px solid ${theme.colors.success}`
-                : `2px solid ${theme.colors.border}`;
-              btn.style.boxShadow = "none";
-            }}
+            onFocus={() => setDeafenFocused(true)}
+            onBlur={() => setDeafenFocused(false)}
           >
             <div style={{ width: "100%", textAlign: "center" }}>
               {voiceState?.is_deafened
