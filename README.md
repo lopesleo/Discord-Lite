@@ -5,6 +5,7 @@
 ![Discord](https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)
 ![Steam Deck](https://img.shields.io/badge/Steam%20Deck-1B2838?style=for-the-badge&logo=steam&logoColor=white)
 ![Decky Loader](https://img.shields.io/badge/Decky%20Loader-Plugin-orange?style=for-the-badge)
+![Claude Code](https://img.shields.io/badge/Built%20with-Claude%20Code-5A67D8?style=for-the-badge&logo=anthropic&logoColor=white)
 
 **A lightweight Discord voice chat integration for Steam Deck**
 
@@ -31,6 +32,17 @@ _Control your Discord voice calls directly from the Quick Access Menu_
 | 🔗 **Auto-Connect**        | Automatically connect to Discord on startup                              |
 | 🌐 **Multi-Language**      | English and Portuguese support                                           |
 | 🎨 **Discord Theme**       | Beautiful Discord-inspired UI                                            |
+
+### 🆕 What's New (v1.2.1)
+
+| Update                          | Description                                                                                      |
+| ------------------------------- | ------------------------------------------------------------------------------------------------ |
+| 🔐 **PKCE OAuth2**              | Secure authentication without client_secret - enhanced security                                  |
+| 🔊 **Improved Volume Control**  | Fixed self-user volume control (redirects to output volume when adjusting your own audio)        |
+| 🎮 **Enhanced Game Sync**       | Better Discord Rich Presence integration with Steam games - smarter caching and polling          |
+| ⚡ **Discord RPC Improvements** | More reliable IPC connection, better error handling, and improved socket path detection          |
+| 🎨 **UI Tweaks**                | Refined user interface elements for better usability and visual consistency                      |
+| 🛠️ **Build & Deploy Refactor** | Streamlined deployment process for both Windows (PowerShell) and Linux/Mac (Bash) environments |
 
 ### 📸 Screenshots
 
@@ -117,6 +129,17 @@ _Screenshots coming soon!_
 | 🔗 **Auto-Conectar**          | Conecte automaticamente ao Discord ao iniciar                       |
 | 🌐 **Multi-Idioma**           | Suporte a Inglês e Português                                        |
 | 🎨 **Tema Discord**           | Interface bonita inspirada no Discord                               |
+
+### 🆕 Novidades (v1.2.1)
+
+| Atualização                      | Descrição                                                                                           |
+| -------------------------------- | --------------------------------------------------------------------------------------------------- |
+| 🔐 **OAuth2 PKCE**               | Autenticação segura sem client_secret - segurança aprimorada                                        |
+| 🔊 **Controle de Volume Melhorado** | Correção do controle de volume próprio (redireciona para volume de saída ao ajustar seu próprio áudio) |
+| 🎮 **Sincronização de Jogo Aprimorada** | Melhor integração Discord Rich Presence com jogos Steam - cache e polling mais inteligentes    |
+| ⚡ **Melhorias no Discord RPC**  | Conexão IPC mais confiável, melhor tratamento de erros e detecção de caminhos de socket aprimorada |
+| 🎨 **Ajustes de Interface**      | Elementos de interface refinados para melhor usabilidade e consistência visual                     |
+| 🛠️ **Refatoração Build & Deploy** | Processo de deploy otimizado para ambientes Windows (PowerShell) e Linux/Mac (Bash)              |
 
 ### 📸 Capturas de Tela
 
@@ -223,8 +246,21 @@ Discord-Lite/
 │   └── pypresence/     # Discord RPC library
 ├── main.py             # Python backend
 ├── plugin.json         # Plugin metadata
+├── CLAUDE.md           # Claude Code project instructions
 └── package.json        # Node dependencies
 ```
+
+### Built with Claude Code
+
+This project was developed with the assistance of [Claude Code](https://claude.ai/code) (Opus 4.5), leveraging AI-assisted development for:
+
+- **Architecture Design**: RPC communication patterns, OAuth2 PKCE implementation
+- **Code Optimization**: Volume control logic, game sync caching, IPC socket detection
+- **Bug Fixes**: Self-user volume control, authentication flow improvements
+- **Documentation**: Comprehensive inline comments and project documentation (CLAUDE.md)
+- **Testing & Debugging**: Error handling, edge case detection, and reliability improvements
+
+Claude Code helped streamline development while maintaining code quality and security best practices.
 
 ---
 
@@ -250,6 +286,7 @@ This project is licensed under the BSD-3-Clause License - see the [LICENSE](LICE
 - [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) - Plugin framework
 - [pypresence](https://github.com/qwertyquerty/pypresence) - Discord RPC library
 - Discord - For the inspiration and API
+- [Claude Code](https://claude.ai/code) by Anthropic - AI-assisted development with Claude Opus 4.5
 
 ---
 
