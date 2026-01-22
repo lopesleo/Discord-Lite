@@ -6,12 +6,12 @@ interface UseGuildsAndChannelsResult {
   guilds: Guild[];
   selectedGuildId: string | null;
   channels: VoiceChannel[];
-  showGuildPicker: boolean;
   showChannelPicker: boolean;
+  isLoadingChannels: boolean;
+  isJoiningChannel: boolean;
   setGuilds: React.Dispatch<React.SetStateAction<Guild[]>>;
   setSelectedGuildId: React.Dispatch<React.SetStateAction<string | null>>;
   setChannels: React.Dispatch<React.SetStateAction<VoiceChannel[]>>;
-  setShowGuildPicker: React.Dispatch<React.SetStateAction<boolean>>;
   setShowChannelPicker: React.Dispatch<React.SetStateAction<boolean>>;
   selectGuild: (guildId: string) => Promise<void>;
   loadChannels: (voiceState: VoiceStateResponse | null) => Promise<void>;
@@ -22,28 +22,38 @@ export function useGuildsAndChannels(): UseGuildsAndChannelsResult {
   const [guilds, setGuilds] = useState<Guild[]>([]);
   const [selectedGuildId, setSelectedGuildId] = useState<string | null>(null);
   const [channels, setChannels] = useState<VoiceChannel[]>([]);
-  const [showGuildPicker, setShowGuildPicker] = useState(false);
   const [showChannelPicker, setShowChannelPicker] = useState(false);
+  const [isLoadingChannels, setIsLoadingChannels] = useState(false);
+  const [isJoiningChannel, setIsJoiningChannel] = useState(false);
 
   const selectGuild = useCallback(async (guildId: string) => {
-    await DiscordAPI.selectGuild(guildId);
-    setSelectedGuildId(guildId);
-    setShowGuildPicker(false);
+    setIsLoadingChannels(true);
+    try {
+      await DiscordAPI.selectGuild(guildId);
+      setSelectedGuildId(guildId);
 
-    const channelsRes = await DiscordAPI.getVoiceChannels(guildId);
-    if (channelsRes.success) {
-      setChannels(channelsRes.channels);
-      setShowChannelPicker(true);
+      const channelsRes = await DiscordAPI.getVoiceChannels(guildId);
+      if (channelsRes.success) {
+        setChannels(channelsRes.channels);
+        setShowChannelPicker(true);
+      }
+    } finally {
+      setIsLoadingChannels(false);
     }
   }, []);
 
   const loadChannels = useCallback(
     async (voiceState: VoiceStateResponse | null) => {
-      const guildId = selectedGuildId || voiceState?.guild_id || undefined;
-      const result = await DiscordAPI.getVoiceChannels(guildId);
-      if (result.success) {
-        setChannels(result.channels);
-        setShowChannelPicker(true);
+      setIsLoadingChannels(true);
+      try {
+        const guildId = selectedGuildId || voiceState?.guild_id || undefined;
+        const result = await DiscordAPI.getVoiceChannels(guildId);
+        if (result.success) {
+          setChannels(result.channels);
+          setShowChannelPicker(true);
+        }
+      } finally {
+        setIsLoadingChannels(false);
       }
     },
     [selectedGuildId]
@@ -54,11 +64,16 @@ export function useGuildsAndChannels(): UseGuildsAndChannelsResult {
       channelId: string,
       onSuccess: (voiceState: VoiceStateResponse) => void
     ) => {
-      const result = await DiscordAPI.joinVoiceChannel(channelId);
-      if (result.success) {
-        setShowChannelPicker(false);
-        const voice = await DiscordAPI.getVoiceState();
-        if (voice.success) onSuccess(voice);
+      setIsJoiningChannel(true);
+      try {
+        const result = await DiscordAPI.joinVoiceChannel(channelId);
+        if (result.success) {
+          setShowChannelPicker(false);
+          const voice = await DiscordAPI.getVoiceState();
+          if (voice.success) onSuccess(voice);
+        }
+      } finally {
+        setIsJoiningChannel(false);
       }
     },
     []
@@ -68,12 +83,12 @@ export function useGuildsAndChannels(): UseGuildsAndChannelsResult {
     guilds,
     selectedGuildId,
     channels,
-    showGuildPicker,
     showChannelPicker,
+    isLoadingChannels,
+    isJoiningChannel,
     setGuilds,
     setSelectedGuildId,
     setChannels,
-    setShowGuildPicker,
     setShowChannelPicker,
     selectGuild,
     loadChannels,

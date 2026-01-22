@@ -4,7 +4,6 @@ import {
   PanelSectionRow,
   SliderField,
   staticClasses,
-  Focusable,
   DropdownItem,
   ToggleField,
 } from "@decky/ui";
@@ -27,26 +26,21 @@ import * as DiscordAPI from "./api/discord-api";
 import { theme } from "./styles/theme";
 import { styles } from "./styles/component-styles";
 
-// Import utilities
-import { formatTime } from "./utils/formatters";
-
 // Import hooks
 import { useDiscordConnection } from "./hooks/useDiscordConnection";
 import { useVoiceState } from "./hooks/useVoiceState";
-import { useCallTimer } from "./hooks/useCallTimer";
 import { useSettings } from "./hooks/useSettings";
 import { useGuildsAndChannels } from "./hooks/useGuildsAndChannels";
 
 // Import components
-import { MemberItem, ServerItem, ChannelItem } from "./components";
+import { MemberItem, ChannelItem } from "./components";
 
 // Main Content Component
 function Content() {
   // UI State (not managed by hooks)
   const [expandedMember, setExpandedMember] = useState<string | null>(null);
-  const [muteFocused, setMuteFocused] = useState(false);
-  const [deafenFocused, setDeafenFocused] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   // Settings Hook
   const settings = useSettings();
@@ -73,11 +67,11 @@ function Content() {
     guilds,
     selectedGuildId,
     channels,
-    showGuildPicker,
     showChannelPicker,
+    isLoadingChannels,
+    isJoiningChannel,
     setGuilds,
     setSelectedGuildId,
-    setShowGuildPicker,
     setShowChannelPicker,
     selectGuild: handleSelectGuild,
     loadChannels: handleLoadChannels,
@@ -102,9 +96,6 @@ function Content() {
     membersInChannelText: t("membersInChannel"),
   });
 
-  // Call Timer Hook
-  const callDuration = useCallTimer(voiceControl.voiceState?.in_voice || false);
-
   // Refs
   const notificationsEnabledRef = useRef(notificationsEnabled);
   notificationsEnabledRef.current = notificationsEnabled;
@@ -125,6 +116,7 @@ function Content() {
   );
 
   const handleSync = useCallback(async () => {
+    setIsSyncing(true);
     try {
       const fullState = await DiscordAPI.syncFullState();
       if (fullState.success) {
@@ -139,6 +131,8 @@ function Content() {
       }
     } catch {
       console.error("Sync error");
+    } finally {
+      setIsSyncing(false);
     }
   }, [voiceControl, setGuilds, setSelectedGuildId, t]);
 
@@ -232,18 +226,45 @@ function Content() {
   }
 
   // Render: Authenticated (main UI)
-  const selectedGuild = guilds.find((g) => g.id === selectedGuildId);
   const { voiceState } = voiceControl;
 
   return (
     <Fragment>
-      {/* Status & Channel */}
+      {/* Connection Status */}
       <PanelSection title="Discord Lite">
         <PanelSectionRow>
           <div style={styles.statusBadge(true)}>
             <span>✅</span>
             <span>{connection.username || t("connected")}</span>
           </div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={handleSync}
+            disabled={isSyncing}
+          >
+            {isSyncing ? "⏳ " : "🔄 "}{t("sync")}
+          </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
+
+      {/* Server & Voice Channel */}
+      <PanelSection title={`🏠 ${t("server")} & 📢 ${t("voiceChannel")}`}>
+        <PanelSectionRow>
+          {guilds.length > 0 ? (
+            <DropdownItem
+              label={t("server")}
+              rgOptions={guilds.map((guild) => ({
+                label: guild.name,
+                data: guild.id,
+              }))}
+              selectedOption={selectedGuildId || guilds[0]?.id}
+              onChange={(option) => handleSelectGuild(option.data)}
+            />
+          ) : (
+            <div style={styles.infoText}>{t("noServers")}</div>
+          )}
         </PanelSectionRow>
 
         {voiceState?.in_voice && voiceState.channel_name && (
@@ -253,205 +274,26 @@ function Content() {
                 <span>🔊</span>
                 <span>{voiceState.channel_name}</span>
               </div>
-              <div style={styles.callTime}>⏱️ {formatTime(callDuration)}</div>
             </div>
           </PanelSectionRow>
         )}
-      </PanelSection>
-
-      {/* Voice Controls */}
-      <PanelSection title={`🎤 ${t("controls")}`}>
-        <PanelSectionRow>
-          <Focusable
-            style={styles.controlButton(
-              !voiceState?.is_muted && !voiceState?.is_deafened,
-              muteFocused,
-              voiceState?.is_deafened || false,
-            )}
-            onActivate={() => {
-              if (!voiceState?.is_deafened) {
-                voiceControl.toggleMute();
-              }
-            }}
-            onFocus={() => setMuteFocused(true)}
-            onBlur={() => setMuteFocused(false)}
-          >
-            <div style={{ width: "100%", textAlign: "center" }}>
-              {voiceState?.is_deafened
-                ? `🔇 ${t("muted")} (${t("deafened")})`
-                : voiceState?.is_muted
-                  ? `🔇 ${t("muted")}`
-                  : `🎤 ${t("micActive")}`}
-            </div>
-          </Focusable>
-        </PanelSectionRow>
-
-        <PanelSectionRow>
-          <Focusable
-            style={styles.controlButton(
-              !voiceState?.is_deafened,
-              deafenFocused,
-            )}
-            onActivate={voiceControl.toggleDeafen}
-            onFocus={() => setDeafenFocused(true)}
-            onBlur={() => setDeafenFocused(false)}
-          >
-            <div style={{ width: "100%", textAlign: "center" }}>
-              {voiceState?.is_deafened
-                ? `🔇 ${t("deafened")}`
-                : `🔊 ${t("audioActive")}`}
-            </div>
-          </Focusable>
-        </PanelSectionRow>
-
-        <PanelSectionRow>
-          <SliderField
-            label={t("microphone")}
-            value={voiceState?.input_volume ?? 100}
-            min={0}
-            max={100}
-            step={5}
-            onChange={voiceControl.setInputVolume}
-            showValue
-          />
-        </PanelSectionRow>
-
-        <PanelSectionRow>
-          <SliderField
-            label={t("volume")}
-            value={voiceState?.output_volume ?? 100}
-            min={0}
-            max={200}
-            step={5}
-            onChange={voiceControl.setOutputVolume}
-            showValue
-          />
-        </PanelSectionRow>
-      </PanelSection>
-
-      {/* Server Selection */}
-      <PanelSection title={`🏠 ${t("server")}`}>
-        {!showGuildPicker ? (
-          <Fragment>
-            {selectedGuild && (
-              <PanelSectionRow>
-                <Focusable
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: theme.spacing.md,
-                    padding: theme.spacing.md,
-                    backgroundColor: "rgba(88, 101, 242, 0.1)",
-                    borderRadius: theme.borderRadius.md,
-                    border: `1px solid rgba(88, 101, 242, 0.3)`,
-                  }}
-                  onActivate={() => setShowGuildPicker(true)}
-                >
-                  {selectedGuild.icon_url ? (
-                    <img
-                      src={selectedGuild.icon_url}
-                      alt={selectedGuild.name}
-                      style={{
-                        width: "40px",
-                        height: "40px",
-                        borderRadius: theme.borderRadius.md,
-                        objectFit: "cover",
-                      }}
-                    />
-                  ) : (
-                    <div
-                      style={{
-                        width: "40px",
-                        height: "40px",
-                        borderRadius: theme.borderRadius.md,
-                        backgroundColor: theme.colors.primary,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        fontSize: "16px",
-                        fontWeight: 600,
-                        color: "#fff",
-                      }}
-                    >
-                      {selectedGuild.name.charAt(0).toUpperCase()}
-                    </div>
-                  )}
-                  <div style={{ flex: 1 }}>
-                    <div
-                      style={{
-                        fontSize: "14px",
-                        fontWeight: 500,
-                        color: theme.colors.text.primary,
-                      }}
-                    >
-                      {selectedGuild.name}
-                    </div>
-                    <div
-                      style={{
-                        fontSize: "12px",
-                        color: theme.colors.text.muted,
-                      }}
-                    >
-                      {t("changeServer")} →
-                    </div>
-                  </div>
-                </Focusable>
-              </PanelSectionRow>
-            )}
-            {!selectedGuild && (
-              <PanelSectionRow>
-                <ButtonItem
-                  layout="below"
-                  onClick={() => setShowGuildPicker(true)}
-                >
-                  📋 {t("changeServer")}
-                </ButtonItem>
-              </PanelSectionRow>
-            )}
-          </Fragment>
-        ) : (
-          <Fragment>
-            {guilds.length > 0 ? (
-              <PanelSectionRow>
-                <div style={styles.serverList}>
-                  {guilds.map((guild) => (
-                    <ServerItem
-                      key={guild.id}
-                      guild={guild}
-                      selected={guild.id === selectedGuildId}
-                      onSelect={() => handleSelectGuild(guild.id)}
-                    />
-                  ))}
-                </div>
-              </PanelSectionRow>
-            ) : (
-              <PanelSectionRow>
-                <div style={styles.infoText}>{t("noServers")}</div>
-              </PanelSectionRow>
-            )}
-            <PanelSectionRow>
-              <ButtonItem
-                layout="below"
-                onClick={() => setShowGuildPicker(false)}
-              >
-                ✖ {t("close")}
-              </ButtonItem>
-            </PanelSectionRow>
-          </Fragment>
-        )}
-      </PanelSection>
-
-      {/* Channel Selection */}
-      <PanelSection title={`📢 ${t("voiceChannel")}`}>
         {!showChannelPicker ? (
           <PanelSectionRow>
-            <ButtonItem layout="below" onClick={() => handleLoadChannels(voiceState)}>
-              🔊 {t("selectChannel")}
+            <ButtonItem
+              layout="below"
+              onClick={() => handleLoadChannels(voiceState)}
+              disabled={isLoadingChannels}
+            >
+              {isLoadingChannels ? "⏳ " : "🔊 "}{t("selectChannel")}
             </ButtonItem>
           </PanelSectionRow>
         ) : (
           <Fragment>
-            {channels.length > 0 ? (
+            {isLoadingChannels ? (
+              <PanelSectionRow>
+                <div style={styles.infoText}>⏳ {t("loading")}</div>
+              </PanelSectionRow>
+            ) : channels.length > 0 ? (
               <PanelSectionRow>
                 <div
                   style={{
@@ -468,6 +310,7 @@ function Content() {
                       channel={channel}
                       selected={channel.id === voiceState?.channel_id}
                       onSelect={() => handleJoinChannel(channel.id)}
+                      disabled={isJoiningChannel}
                     />
                   ))}
                 </div>
@@ -481,6 +324,7 @@ function Content() {
               <ButtonItem
                 layout="below"
                 onClick={() => setShowChannelPicker(false)}
+                disabled={isJoiningChannel}
               >
                 ✖ {t("close")}
               </ButtonItem>
@@ -496,6 +340,54 @@ function Content() {
           </PanelSectionRow>
         )}
       </PanelSection>
+
+      {/* Voice Controls - Only when in channel */}
+      {voiceState?.in_voice && (
+        <PanelSection title={`🎤 ${t("controls")}`}>
+          <PanelSectionRow>
+            <ToggleField
+              label={`🎤 ${t("microphone")}`}
+              description={voiceState?.is_muted ? t("muted") : t("micActive")}
+              checked={!voiceState?.is_muted}
+              onChange={() => voiceControl.toggleMute()}
+              disabled={voiceState?.is_deafened}
+            />
+          </PanelSectionRow>
+
+          <PanelSectionRow>
+            <ToggleField
+              label={`🔊 Audio`}
+              description={voiceState?.is_deafened ? t("deafened") : t("audioActive")}
+              checked={!voiceState?.is_deafened}
+              onChange={voiceControl.toggleDeafen}
+            />
+          </PanelSectionRow>
+
+          <PanelSectionRow>
+            <SliderField
+              label={`🎤 ${t("microphone")} ${t("volume")}`}
+              value={voiceState?.input_volume ?? 100}
+              min={0}
+              max={100}
+              step={5}
+              onChange={voiceControl.setInputVolume}
+              showValue
+            />
+          </PanelSectionRow>
+
+          <PanelSectionRow>
+            <SliderField
+              label={`🔊 ${t("volume")}`}
+              value={voiceState?.output_volume ?? 100}
+              min={0}
+              max={200}
+              step={5}
+              onChange={voiceControl.setOutputVolume}
+              showValue
+            />
+          </PanelSectionRow>
+        </PanelSection>
+      )}
 
       {/* Members */}
       {voiceState?.in_voice &&
@@ -575,23 +467,17 @@ function Content() {
                 onChange={(opt) => updateLanguage(opt.data as Language)}
               />
             </PanelSectionRow>
+
+            <PanelSectionRow>
+              <ButtonItem
+                layout="below"
+                onClick={connection.handleLogout}
+              >
+                🚪 {t("disconnect")}
+              </ButtonItem>
+            </PanelSectionRow>
           </Fragment>
         )}
-      </PanelSection>
-
-      {/* Actions */}
-      <PanelSection>
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={handleSync}>
-            🔄 {t("sync")}
-          </ButtonItem>
-        </PanelSectionRow>
-
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={connection.handleLogout}>
-            🚪 {t("disconnect")}
-          </ButtonItem>
-        </PanelSectionRow>
       </PanelSection>
     </Fragment>
   );
