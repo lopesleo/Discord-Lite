@@ -8,1094 +8,129 @@ import {
   DropdownItem,
   ToggleField,
 } from "@decky/ui";
-import { callable, definePlugin, toaster } from "@decky/api";
-import { useState, useEffect, useCallback, Fragment, useRef } from "react";
-
-// ==================== TRANSLATIONS ====================
-
-const translations = {
-  en: {
-    // General
-    loading: "Loading...",
-    sync: "SYNC",
-    disconnect: "DISCONNECT",
-    connect: "CONNECT",
-    connecting: "Connecting...",
-    connected: "Connected",
-    connectedAs: "Connected as",
-    notConnected: "Not connected",
-    error: "Error",
-    success: "Success",
-
-    // Discord status
-    discordNotInstalled: "Discord not installed",
-    installDiscord:
-      "Install Discord via Discover (Flatpak) to use this plugin.",
-    discordNotRunning: "Discord is not running",
-    launchDiscord: "LAUNCH DISCORD",
-    launching: "Launching...",
-    openDiscord: "Discord open! Click to connect",
-    connectToDiscord: "CONNECT TO DISCORD",
-    authWindow: "A window will appear in Discord to authorize",
-
-    // Voice controls
-    controls: "Controls",
-    muted: "MUTED",
-    micActive: "MIC ACTIVE",
-    deafened: "DEAFENED",
-    audioActive: "AUDIO ACTIVE",
-    microphone: "Microphone",
-    volume: "Volume",
-
-    // Server & Channel
-    server: "Server",
-    changeServer: "CHANGE SERVER",
-    noServers: "No servers found",
-    close: "CLOSE",
-    voiceChannel: "Voice Channel",
-    selectChannel: "SELECT CHANNEL",
-    noChannels: "No voice channels",
-    leaveChannel: "LEAVE CHANNEL",
-
-    // Members
-    members: "Members",
-    userVolume: "Volume",
-    unmuteUser: "Unmute user",
-    muteUser: "Mute user",
-
-    // Settings
-    settings: "Settings",
-    showSettings: "SHOW",
-    hideSettings: "HIDE",
-    notifications: "Notifications",
-    notificationsDesc: "Show toasts when members join/leave",
-    autoConnect: "Auto-connect",
-    autoConnectDesc: "Connect automatically when Discord is open",
-    language: "Language",
-    steamSync: "Steam Game Sync",
-    steamSyncDesc: "Show current game in Discord status",
-
-    // Call time
-    inCall: "In call",
-    callTime: "Call time",
-
-    // Toasts
-    joined: "joined",
-    left: "left",
-    theCall: "the call",
-    syncComplete: "Synced",
-    membersInChannel: "members in channel",
-  },
-  pt: {
-    // General
-    loading: "Carregando...",
-    sync: "SINCRONIZAR",
-    disconnect: "DESCONECTAR",
-    connect: "CONECTAR",
-    connecting: "Conectando...",
-    connected: "Conectado",
-    connectedAs: "Conectado como",
-    notConnected: "Não conectado",
-    error: "Erro",
-    success: "Sucesso",
-
-    // Discord status
-    discordNotInstalled: "Discord não instalado",
-    installDiscord:
-      "Instale o Discord pelo Discover (Flatpak) para usar este plugin.",
-    discordNotRunning: "Discord não está aberto",
-    launchDiscord: "ABRIR DISCORD",
-    launching: "Iniciando...",
-    openDiscord: "Discord aberto! Clique para conectar",
-    connectToDiscord: "CONECTAR AO DISCORD",
-    authWindow: "Uma janela aparecerá no Discord para autorizar",
-
-    // Voice controls
-    controls: "Controles",
-    muted: "MUTADO",
-    micActive: "MICROFONE ATIVO",
-    deafened: "SURDO",
-    audioActive: "ÁUDIO ATIVO",
-    microphone: "Microfone",
-    volume: "Volume",
-
-    // Server & Channel
-    server: "Servidor",
-    changeServer: "TROCAR SERVIDOR",
-    noServers: "Nenhum servidor encontrado",
-    close: "FECHAR",
-    voiceChannel: "Canal de Voz",
-    selectChannel: "ESCOLHER CANAL",
-    noChannels: "Nenhum canal de voz",
-    leaveChannel: "SAIR DO CANAL",
-
-    // Members
-    members: "Membros",
-    userVolume: "Volume",
-    unmuteUser: "Desmutar usuário",
-    muteUser: "Mutar usuário",
-
-    // Settings
-    settings: "Configurações",
-    showSettings: "MOSTRAR",
-    hideSettings: "OCULTAR",
-    notifications: "Notificações",
-    notificationsDesc: "Mostrar toasts quando membros entram/saem",
-    autoConnect: "Auto-conectar",
-    autoConnectDesc: "Conectar automaticamente quando Discord estiver aberto",
-    language: "Idioma",
-    steamSync: "Sincronizar Jogo Steam",
-    steamSyncDesc: "Mostrar jogo atual no status do Discord",
-
-    // Call time
-    inCall: "Na call",
-    callTime: "Tempo na call",
-
-    // Toasts
-    joined: "entrou",
-    left: "saiu",
-    theCall: "da call",
-    syncComplete: "Sincronizado",
-    membersInChannel: "membros no canal",
-  },
-};
-
-type Language = "en" | "pt";
-type TranslationKey = keyof (typeof translations)["en"];
-
-// ==================== INTERFACES ====================
-
-interface AutoAuthResponse {
-  success: boolean;
-  authenticated: boolean;
-  user?: { username?: string; id?: string };
-  message: string;
-}
-
-interface VoiceMember {
-  user_id: string;
-  username: string;
-  avatar?: string;
-  mute: boolean;
-  deaf: boolean;
-  volume: number;
-}
-
-interface VoiceChannel {
-  id: string;
-  name: string;
-  type: number;
-}
-
-interface Guild {
-  id: string;
-  name: string;
-  icon_url?: string;
-}
-
-interface VoiceStateResponse {
-  success: boolean;
-  authenticated?: boolean;
-  is_muted?: boolean;
-  is_deafened?: boolean;
-  input_volume?: number;
-  output_volume?: number;
-  channel_id?: string | null;
-  channel_name?: string | null;
-  guild_id?: string | null;
-  in_voice?: boolean;
-  members?: VoiceMember[];
-  speaking_users?: string[];
-  message?: string;
-}
-
-interface ActionResponse {
-  success: boolean;
-  is_muted?: boolean;
-  is_deafened?: boolean;
-  volume?: number;
-  message?: string;
-}
-
-interface ChannelsResponse {
-  success: boolean;
-  guild_id?: string;
-  channels: VoiceChannel[];
-  message?: string;
-}
-
-interface GuildsResponse {
-  success: boolean;
-  guilds: Guild[];
-  selected_guild_id?: string;
-  message?: string;
-}
-
-interface DiscordStatusResponse {
-  success: boolean;
-  installed?: boolean;
-  running?: boolean;
-  flatpak?: boolean;
-  native?: boolean;
-  message?: string;
-}
-
-interface SettingsResponse {
-  success: boolean;
-  settings: {
-    notifications_enabled?: boolean;
-    auto_connect?: boolean;
-    game_sync_enabled?: boolean;
-    language?: Language;
-    user_volumes?: Record<string, number>;
-  };
-}
-
-interface VoiceEvent {
-  type: "VOICE_JOIN" | "VOICE_LEAVE";
-  user_id?: string;
-  username?: string;
-  avatar?: string;
-}
-
-// ==================== CALLABLE FUNCTIONS ====================
-
-const autoAuth = callable<[], AutoAuthResponse>("auto_auth");
-const checkStatus = callable<[], AutoAuthResponse>("check_status");
-const logout = callable<[], ActionResponse>("logout");
-const getVoiceState = callable<[], VoiceStateResponse>("get_voice_state");
-const toggleMute = callable<[], ActionResponse>("toggle_mute");
-const toggleDeafen = callable<[], ActionResponse>("toggle_deafen");
-const setInputVolume = callable<[number], ActionResponse>("set_input_volume");
-const setOutputVolume = callable<[number], ActionResponse>("set_output_volume");
-const leaveVoice = callable<[], ActionResponse>("leave_voice");
-const getVoiceChannels = callable<[string?], ChannelsResponse>(
-  "get_voice_channels",
-);
-const joinVoiceChannel = callable<[string], ActionResponse>(
-  "join_voice_channel",
-);
-const setUserVolume = callable<[string, number], ActionResponse>(
-  "set_user_volume",
-);
-const muteUser = callable<[string, boolean], ActionResponse>("mute_user");
-const getGuilds = callable<[], GuildsResponse>("get_guilds");
-const selectGuild = callable<[string], ActionResponse>("select_guild");
-const checkDiscordInstalled = callable<[], DiscordStatusResponse>(
-  "check_discord_installed",
-);
-const launchDiscord = callable<[], ActionResponse>("launch_discord");
-const checkDiscordRunning = callable<[], DiscordStatusResponse>(
-  "check_discord_running",
-);
-const syncFullState = callable<
-  [],
-  VoiceStateResponse & {
-    guilds?: Guild[];
-    selected_guild_id?: string;
-    is_camera_on?: boolean;
-    is_screen_sharing?: boolean;
-  }
->("sync_full_state");
-const getPendingEvents = callable<
-  [],
-  { success: boolean; events: VoiceEvent[] }
->("get_pending_events");
-const getSettings = callable<[], SettingsResponse>("get_settings");
-const saveSettings = callable<[Record<string, unknown>], ActionResponse>(
-  "save_settings_async",
-);
-
-// ==================== HELPER FUNCTIONS ====================
-
-const formatTime = (seconds: number): string => {
-  const hrs = Math.floor(seconds / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  const secs = seconds % 60;
-
-  if (hrs > 0) {
-    return `${hrs}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
-  }
-  return `${mins}:${secs.toString().padStart(2, "0")}`;
-};
-
-// ==================== STYLES ====================
-
-const theme = {
-  colors: {
-    primary: "#5865F2",
-    primaryHover: "#4752C4",
-    success: "#3BA55C",
-    danger: "#ED4245",
-    warning: "#FAA61A",
-    background: {
-      primary: "rgba(30, 31, 34, 0.95)",
-      secondary: "rgba(43, 45, 49, 0.9)",
-      tertiary: "rgba(54, 57, 63, 0.8)",
-      hover: "rgba(79, 84, 92, 0.4)",
-    },
-    text: {
-      primary: "#FFFFFF",
-      secondary: "#B9BBBE",
-      muted: "#72767D",
-    },
-    border: "rgba(255, 255, 255, 0.06)",
-  },
-  borderRadius: {
-    sm: "4px",
-    md: "8px",
-    lg: "12px",
-    full: "50%",
-  },
-  spacing: {
-    xs: "4px",
-    sm: "8px",
-    md: "12px",
-    lg: "16px",
-    xl: "20px",
-  },
-};
-
-const styles = {
-  // Status Badge
-  statusBadge: (connected: boolean) => ({
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: theme.spacing.sm,
-    padding: `${theme.spacing.md} ${theme.spacing.lg}`,
-    backgroundColor: connected
-      ? "rgba(59, 165, 92, 0.15)"
-      : "rgba(88, 101, 242, 0.15)",
-    borderRadius: theme.borderRadius.lg,
-    fontSize: "14px",
-    fontWeight: 600,
-    color: connected ? theme.colors.success : theme.colors.primary,
-    border: connected
-      ? `1px solid rgba(59, 165, 92, 0.3)`
-      : `1px solid rgba(88, 101, 242, 0.3)`,
-  }),
-
-  // Channel Info Badge
-  channelBadge: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: `${theme.spacing.sm} ${theme.spacing.md}`,
-    backgroundColor: "rgba(88, 101, 242, 0.1)",
-    borderRadius: theme.borderRadius.md,
-    marginTop: theme.spacing.sm,
-    border: `1px solid rgba(88, 101, 242, 0.2)`,
-  },
-
-  channelName: {
-    display: "flex",
-    alignItems: "center",
-    gap: theme.spacing.sm,
-    color: theme.colors.primary,
-    fontSize: "13px",
-    fontWeight: 500,
-  },
-
-  callTime: {
-    fontSize: "12px",
-    color: theme.colors.text.muted,
-    fontFamily: "monospace",
-  },
-
-  // Control Buttons
-  controlButton: (
-    active: boolean,
-    focused: boolean = false,
-    disabled: boolean = false,
-  ) => ({
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: theme.spacing.sm,
-    padding: `${theme.spacing.md} ${theme.spacing.lg}`,
-    backgroundColor: disabled
-      ? "rgba(128, 128, 128, 0.1)"
-      : active
-        ? "rgba(59, 165, 92, 0.2)"
-        : theme.colors.background.tertiary,
-    borderRadius: theme.borderRadius.md,
-    cursor: disabled ? "not-allowed" : "pointer",
-    transition: "all 0.15s ease",
-    border: focused
-      ? `2px solid ${theme.colors.primary}`
-      : active
-        ? `2px solid ${theme.colors.success}`
-        : `2px solid ${theme.colors.border}`,
-    boxShadow: focused ? `0 0 8px rgba(88, 101, 242, 0.5)` : "none",
-    opacity: disabled ? 0.5 : 1,
-  }),
-
-  // Member Items
-  memberItem: {
-    backgroundColor: theme.colors.background.tertiary,
-    borderRadius: theme.borderRadius.md,
-    marginBottom: theme.spacing.xs,
-    border: `1px solid transparent`,
-    transition: "all 0.15s ease",
-  },
-
-  memberItemFocused: {
-    backgroundColor: "rgba(88, 101, 242, 0.15)",
-    borderRadius: theme.borderRadius.md,
-    marginBottom: theme.spacing.xs,
-    overflow: "hidden",
-    border: `1px solid ${theme.colors.primary}`,
-    boxShadow: `0 0 12px rgba(88, 101, 242, 0.25)`,
-  },
-
-  memberHeader: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: theme.spacing.md,
-    cursor: "pointer",
-    borderRadius: theme.borderRadius.md,
-    border: "2px solid transparent", // Borda invisível por padrão para não pular layout
-    transition: "all 0.2s ease",
-  },
-
-  memberHeaderFocused: {
-    backgroundColor: "rgba(255, 255, 255, 0.1)", // Um brilho de fundo
-    border: "2px solid white", // A borda branca clássica do Steam Deck
-  },
-
-  memberAvatar: {
-    width: "36px",
-    height: "36px",
-    borderRadius: theme.borderRadius.full,
-    backgroundColor: theme.colors.background.hover,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    fontSize: "14px",
-    fontWeight: 600,
-    marginRight: theme.spacing.md,
-    color: theme.colors.text.primary,
-    border: `2px solid ${theme.colors.border}`,
-  },
-
-  memberInfo: {
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: "2px",
-  },
-
-  memberName: {
-    fontSize: "14px",
-    fontWeight: 500,
-    color: theme.colors.text.primary,
-  },
-
-  memberStatus: {
-    fontSize: "12px",
-    color: theme.colors.text.muted,
-    display: "flex",
-    alignItems: "center",
-    gap: theme.spacing.xs,
-  },
-
-  memberControls: {
-    padding: theme.spacing.md,
-    paddingTop: theme.spacing.sm,
-    borderTop: `1px solid ${theme.colors.border}`,
-    backgroundColor: "rgba(0, 0, 0, 0.2)",
-  },
-
-  // Info Text
-  infoText: {
-    fontSize: "12px",
-    color: theme.colors.text.muted,
-    textAlign: "center" as const,
-    padding: theme.spacing.md,
-  },
-
-  // Server List (vertical scroll)
-  serverList: {
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: "4px",
-    maxHeight: "200px",
-    overflowY: "auto" as const,
-    padding: theme.spacing.xs,
-    backgroundColor: theme.colors.background.secondary,
-    borderRadius: theme.borderRadius.md,
-  },
-
-  serverItem: (selected: boolean, focused: boolean) => ({
-    display: "flex",
-    alignItems: "center",
-    gap: theme.spacing.sm,
-    padding: `${theme.spacing.sm} ${theme.spacing.md}`,
-    backgroundColor: selected
-      ? "rgba(88, 101, 242, 0.25)"
-      : focused
-        ? "rgba(88, 101, 242, 0.15)"
-        : "transparent",
-    borderRadius: theme.borderRadius.md,
-    cursor: "pointer",
-    transition: "all 0.15s ease",
-    border: focused
-      ? `2px solid ${theme.colors.primary}`
-      : selected
-        ? `2px solid rgba(88, 101, 242, 0.5)`
-        : `2px solid transparent`,
-    boxShadow: focused ? `0 0 8px rgba(88, 101, 242, 0.4)` : "none",
-    minHeight: "44px",
-  }),
-
-  serverIcon: {
-    width: "32px",
-    height: "32px",
-    borderRadius: theme.borderRadius.sm,
-    backgroundColor: theme.colors.background.hover,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    fontSize: "14px",
-    fontWeight: 600,
-    color: theme.colors.text.primary,
-    flexShrink: 0,
-    objectFit: "cover" as const,
-  },
-
-  serverName: {
-    fontSize: "13px",
-    color: theme.colors.text.primary,
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap" as const,
-    flex: 1,
-  },
-
-  // Channel List
-  channelItem: (selected: boolean, focused: boolean) => ({
-    display: "flex",
-    alignItems: "center",
-    gap: theme.spacing.sm,
-    padding: `${theme.spacing.sm} ${theme.spacing.md}`,
-    backgroundColor: selected
-      ? "rgba(88, 101, 242, 0.25)"
-      : focused
-        ? "rgba(88, 101, 242, 0.15)"
-        : "transparent",
-    borderRadius: theme.borderRadius.md,
-    cursor: "pointer",
-    transition: "all 0.15s ease",
-    border: focused
-      ? `2px solid ${theme.colors.primary}`
-      : selected
-        ? `2px solid rgba(88, 101, 242, 0.5)`
-        : `2px solid transparent`,
-    boxShadow: focused ? `0 0 8px rgba(88, 101, 242, 0.4)` : "none",
-    marginBottom: "2px",
-  }),
-
-  channelIcon: (focused: boolean) => ({
-    fontSize: "14px",
-    color: focused ? theme.colors.primary : theme.colors.text.muted,
-  }),
-
-  channelText: (selected: boolean, focused: boolean) => ({
-    fontSize: "13px",
-    color:
-      focused || selected ? theme.colors.primary : theme.colors.text.secondary,
-    fontWeight: focused || selected ? 500 : 400,
-  }),
-
-  // Speaking indicator
-  speakingRing: {
-    boxShadow: `0 0 0 3px ${theme.colors.success}, 0 0 12px ${theme.colors.success}`,
-  },
-
-  speakingBadge: {
-    position: "absolute" as const,
-    bottom: "-2px",
-    right: "-2px",
-    width: "12px",
-    height: "12px",
-    borderRadius: "50%",
-    backgroundColor: theme.colors.success,
-    border: `2px solid ${theme.colors.background.primary}`,
-  },
-};
-
-// ==================== MEMBER COMPONENT ====================
-
-interface MemberItemProps {
-  member: VoiceMember;
-  savedVolume?: number;
-  isSpeaking?: boolean;
-  onVolumeChange: (userId: string, volume: number) => void;
-  onMuteToggle: (userId: string, muted: boolean) => void;
-  expanded: boolean;
-  onToggleExpand: () => void;
-  t: (key: TranslationKey) => string;
-}
-
-function MemberItem({
-  member,
-  savedVolume,
-  isSpeaking,
-  onVolumeChange,
-  onMuteToggle,
-  expanded,
-  onToggleExpand,
-  t,
-}: MemberItemProps) {
-  const [localVolume, setLocalVolume] = useState(
-    savedVolume ?? member.volume ?? 100,
-  );
-  const [isMuted, setIsMuted] = useState(member.mute);
-
-  // NOVO: Estado de foco visual APENAS para o cabeçalho
-  const [headerFocused, setHeaderFocused] = useState(false);
-
-  // Sincronização com o Backend
-  useEffect(() => {
-    setLocalVolume(savedVolume ?? member.volume ?? 100);
-  }, [savedVolume, member.volume]);
-
-  useEffect(() => {
-    setIsMuted(member.mute);
-  }, [member.mute]);
-
-  const handleVolumeChange = useCallback(
-    (value: number) => {
-      setLocalVolume(value);
-      onVolumeChange(member.user_id, value);
-    },
-    [member.user_id, onVolumeChange],
-  );
-
-  const handleMuteToggle = useCallback(() => {
-    const newMuted = !isMuted;
-    setIsMuted(newMuted);
-    onMuteToggle(member.user_id, newMuted);
-  }, [member.user_id, isMuted, onMuteToggle]);
-
-  const avatarUrl = member.avatar
-    ? `https://cdn.discordapp.com/avatars/${member.user_id}/${member.avatar}.png?size=64`
-    : null;
-
-  const getStatusIcon = () => {
-    if (isSpeaking) return "🗣️";
-    if (member.deaf) return "🔇";
-    if (member.mute) return "🎤❌";
-    return "🎤";
-  };
-
-  const avatarStyle = {
-    ...styles.memberAvatar,
-    objectFit: "cover" as const,
-    ...(isSpeaking ? styles.speakingRing : {}),
-  };
-
-  return (
-    <div style={styles.memberItem}>
-      <Focusable
-        onActivate={onToggleExpand}
-        onFocus={() => setHeaderFocused(true)}
-        onBlur={() => setHeaderFocused(false)}
-        style={{
-          ...styles.memberHeader,
-          ...(headerFocused ? styles.memberHeaderFocused : {}),
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center" }}>
-          <div style={{ position: "relative" as const }}>
-            {avatarUrl ? (
-              <img src={avatarUrl} alt={member.username} style={avatarStyle} />
-            ) : (
-              <div style={avatarStyle}>
-                {member.username.charAt(0).toUpperCase()}
-              </div>
-            )}
-            {isSpeaking && <div style={styles.speakingBadge} />}
-          </div>
-          <div style={{ ...styles.memberInfo, marginLeft: theme.spacing.md }}>
-            <span style={styles.memberName}>{member.username}</span>
-            <span style={styles.memberStatus}>
-              {getStatusIcon()} {localVolume}%
-            </span>
-          </div>
-        </div>
-        <span style={{ color: theme.colors.text.muted }}>
-          {expanded ? "▲" : "▼"}
-        </span>
-      </Focusable>
-
-      {expanded && (
-        <div style={styles.memberControls}>
-          <SliderField
-            label={`${t("userVolume")}: ${localVolume}%`}
-            value={localVolume}
-            min={0}
-            max={200}
-            step={5}
-            onChange={handleVolumeChange}
-            showValue={false}
-          />
-
-          <div style={{ marginTop: theme.spacing.sm }}>
-            <ButtonItem layout="below" onClick={handleMuteToggle}>
-              {isMuted ? `🔊 ${t("unmuteUser")}` : `🔇 ${t("muteUser")}`}
-            </ButtonItem>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ==================== SERVER ITEM COMPONENT ====================
-
-interface ServerItemProps {
-  guild: Guild;
-  selected: boolean;
-  onSelect: () => void;
-}
-
-function ServerItem({ guild, selected, onSelect }: ServerItemProps) {
-  const [isFocused, setIsFocused] = useState(false);
-
-  return (
-    <Focusable
-      style={styles.serverItem(selected, isFocused)}
-      onActivate={onSelect}
-      onFocus={() => setIsFocused(true)}
-      onBlur={() => setIsFocused(false)}
-    >
-      {guild.icon_url ? (
-        <img src={guild.icon_url} alt={guild.name} style={styles.serverIcon} />
-      ) : (
-        <div style={styles.serverIcon}>
-          {guild.name.charAt(0).toUpperCase()}
-        </div>
-      )}
-      <span style={styles.serverName}>{guild.name}</span>
-      {selected && <span style={{ color: theme.colors.success }}>✓</span>}
-    </Focusable>
-  );
-}
-
-// ==================== CHANNEL ITEM COMPONENT ====================
-
-interface ChannelItemProps {
-  channel: VoiceChannel;
-  selected: boolean;
-  onSelect: () => void;
-}
-
-function ChannelItem({ channel, selected, onSelect }: ChannelItemProps) {
-  const [isFocused, setIsFocused] = useState(false);
-
-  return (
-    <Focusable
-      style={styles.channelItem(selected, isFocused)}
-      onActivate={onSelect}
-      onFocus={() => setIsFocused(true)}
-      onBlur={() => setIsFocused(false)}
-    >
-      <span style={styles.channelIcon(isFocused)}>🔊</span>
-      <span style={styles.channelText(selected, isFocused)}>
-        {channel.name}
-      </span>
-      {isFocused && (
-        <span style={{ marginLeft: "auto", color: theme.colors.primary }}>
-          →
-        </span>
-      )}
-    </Focusable>
-  );
-}
-
-// ==================== MAIN COMPONENT ====================
-let globalCallStartTime: number | null = null;
+import { definePlugin, toaster } from "@decky/api";
+import { useState, useCallback, Fragment, useRef } from "react";
+
+// Import types
+import type {
+  Language,
+  TranslationKey,
+} from "./types/index";
+
+// Import translations
+import { translations } from "./i18n/translations";
+
+// Import API
+import * as DiscordAPI from "./api/discord-api";
+
+// Import styles
+import { theme } from "./styles/theme";
+import { styles } from "./styles/component-styles";
+
+// Import utilities
+import { formatTime } from "./utils/formatters";
+
+// Import hooks
+import { useDiscordConnection } from "./hooks/useDiscordConnection";
+import { useVoiceState } from "./hooks/useVoiceState";
+import { useCallTimer } from "./hooks/useCallTimer";
+import { useSettings } from "./hooks/useSettings";
+import { useGuildsAndChannels } from "./hooks/useGuildsAndChannels";
+
+// Import components
+import { MemberItem, ServerItem, ChannelItem } from "./components";
+
+// Main Content Component
 function Content() {
-  // Language
-  const [language, setLanguage] = useState<Language>("pt");
-  const t = useCallback(
-    (key: TranslationKey): string => translations[language][key] || key,
-    [language],
-  );
-
-  // Settings
-  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
-  const [autoConnectEnabled, setAutoConnectEnabled] = useState(false);
-  const [steamSyncEnabled, setSteamSyncEnabled] = useState(true);
-  const [userVolumes, setUserVolumes] = useState<Record<string, number>>({});
-
-  // Auth state
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [statusMessage, setStatusMessage] = useState("");
-  const [username, setUsername] = useState("");
-
-  // Discord status
-  const [discordInstalled, setDiscordInstalled] = useState(true);
-  const [discordRunning, setDiscordRunning] = useState(false);
-  const [isLaunching, setIsLaunching] = useState(false);
-
-  // Voice state
-  const [voiceState, setVoiceState] = useState<VoiceStateResponse | null>(null);
+  // UI State (not managed by hooks)
   const [expandedMember, setExpandedMember] = useState<string | null>(null);
-
-  // Focus states for control buttons
   const [muteFocused, setMuteFocused] = useState(false);
   const [deafenFocused, setDeafenFocused] = useState(false);
-
-  // Call timer
-  const [callDuration, setCallDuration] = useState(0);
-
-  // Servers & Channels
-  const [guilds, setGuilds] = useState<Guild[]>([]);
-  const [selectedGuildId, setSelectedGuildId] = useState<string | null>(null);
-  const [channels, setChannels] = useState<VoiceChannel[]>([]);
-  const [showGuildPicker, setShowGuildPicker] = useState(false);
-  const [showChannelPicker, setShowChannelPicker] = useState(false);
-
-  // Settings panel
   const [showSettings, setShowSettings] = useState(false);
+
+  // Settings Hook
+  const settings = useSettings();
+  const {
+    language,
+    notificationsEnabled,
+    autoConnectEnabled,
+    updateNotifications,
+    updateAutoConnect,
+    updateSteamSync,
+    updateLanguage,
+    updateUserVolume,
+  } = settings;
+
+  // Translation helper
+  const t = useCallback(
+    (key: TranslationKey): string => translations[language][key] || key,
+    [language]
+  );
+
+  // Guilds and Channels Hook
+  const guildsAndChannels = useGuildsAndChannels();
+  const {
+    guilds,
+    selectedGuildId,
+    channels,
+    showGuildPicker,
+    showChannelPicker,
+    setGuilds,
+    setSelectedGuildId,
+    setShowGuildPicker,
+    setShowChannelPicker,
+    selectGuild: handleSelectGuild,
+    loadChannels: handleLoadChannels,
+    joinChannel,
+  } = guildsAndChannels;
+
+  // Discord Connection Hook
+  const connection = useDiscordConnection({
+    language,
+    autoConnectEnabled,
+    onAuthSuccess: async (data) => {
+      if (data.voiceState) voiceControl.setVoiceState(data.voiceState);
+      setGuilds(data.guilds);
+      setSelectedGuildId(data.selectedGuildId);
+    },
+  });
+
+  // Voice State Hook
+  const voiceControl = useVoiceState({
+    isAuthenticated: connection.isAuthenticated,
+    syncCompleteText: t("syncComplete"),
+    membersInChannelText: t("membersInChannel"),
+  });
+
+  // Call Timer Hook
+  const callDuration = useCallTimer(voiceControl.voiceState?.in_voice || false);
 
   // Refs
   const notificationsEnabledRef = useRef(notificationsEnabled);
   notificationsEnabledRef.current = notificationsEnabled;
 
-  // ==================== LOAD SETTINGS ====================
+  // Handlers
+  const handleJoinChannel = useCallback(
+    (channelId: string) => {
+      joinChannel(channelId, (voice) => voiceControl.setVoiceState(voice));
+    },
+    [joinChannel, voiceControl]
+  );
 
-  useEffect(() => {
-    const loadSettingsData = async () => {
-      try {
-        const result = await getSettings();
-        if (result.success && result.settings) {
-          setNotificationsEnabled(
-            result.settings.notifications_enabled ?? true,
-          );
-          setAutoConnectEnabled(result.settings.auto_connect ?? false);
-          setSteamSyncEnabled(result.settings.game_sync_enabled ?? true);
-          setLanguage(result.settings.language ?? "pt");
-          setUserVolumes(result.settings.user_volumes ?? {});
-        }
-      } catch (e) {
-        console.error("Error loading settings:", e);
-      }
-    };
-    loadSettingsData();
-  }, []);
+  const handleUserMuteToggle = useCallback(
+    async (userId: string, muted: boolean) => {
+      await DiscordAPI.muteUser(userId, muted);
+    },
+    []
+  );
 
-  // ==================== CALL TIMER (CORRIGIDO) ====================
-
-  useEffect(() => {
-    if (voiceState?.in_voice) {
-      if (!globalCallStartTime) {
-        globalCallStartTime = Date.now();
-      }
-    } else {
-      globalCallStartTime = null;
-      setCallDuration(0);
-    }
-  }, [voiceState?.in_voice]);
-
-  useEffect(() => {
-    if (!voiceState?.in_voice || !globalCallStartTime) return;
-
-    const updateTime = () => {
-      if (globalCallStartTime) {
-        setCallDuration(Math.floor((Date.now() - globalCallStartTime) / 1000));
-      }
-    };
-
-    updateTime();
-
-    const interval = setInterval(updateTime, 1000);
-
-    return () => clearInterval(interval);
-  }, [voiceState?.in_voice]);
-
-  // ==================== HANDLERS ====================
-
-  const handleConnect = useCallback(async () => {
-    setIsConnecting(true);
-    setStatusMessage(translations[language].connecting);
-
+  const handleSync = useCallback(async () => {
     try {
-      const result = await autoAuth();
-
-      if (result.authenticated) {
-        setIsAuthenticated(true);
-        setUsername(result.user?.username || "");
-        setStatusMessage(
-          `${translations[language].connectedAs} ${result.user?.username || ""}`,
-        );
-
-        const voice = await getVoiceState();
-        if (voice.success) setVoiceState(voice);
-
-        const guildsRes = await getGuilds();
-        if (guildsRes.success) {
-          setGuilds(guildsRes.guilds);
-          setSelectedGuildId(guildsRes.selected_guild_id || null);
-        }
-      } else {
-        setStatusMessage(result.message);
-      }
-    } catch {
-      setStatusMessage(translations[language].error);
-    } finally {
-      setIsConnecting(false);
-    }
-  }, [language]);
-
-  // ==================== INITIAL CHECK & POLLING ====================
-
-  useEffect(() => {
-    let intervalId: ReturnType<typeof setInterval>;
-
-    const checkStatusLoop = async () => {
-      try {
-        // 1. Verifica se está instalado (só precisa confirmar uma vez se for true)
-        if (!discordInstalled) {
-          const installed = await checkDiscordInstalled();
-          setDiscordInstalled(installed.installed || false);
-          // Se não estiver instalado, nem continua
-          if (!installed.installed) return;
-        }
-
-        // 2. Verifica se está rodando
-        const running = await checkDiscordRunning();
-        const isRunning = running.running || false;
-        setDiscordRunning(isRunning);
-
-        // 3. Se estiver rodando, tenta pegar o status da autenticação
-        if (isRunning) {
-          // Se já estamos autenticados, apenas atualiza o status
-          if (isAuthenticated) {
-            // Opcional: Atualizar info do usuário se necessário
-          } else {
-            // Se não estamos autenticados, verifica se já existe uma sessão válida
-            const status = await checkStatus();
-            if (status.authenticated) {
-              setIsAuthenticated(true);
-              setUsername(status.user?.username || "");
-              setStatusMessage(
-                `${t("connectedAs")} ${status.user?.username || ""}`,
-              );
-
-              // Carrega dados iniciais
-              const voice = await getVoiceState();
-              if (voice.success) setVoiceState(voice);
-              const guildsRes = await getGuilds();
-              if (guildsRes.success) {
-                setGuilds(guildsRes.guilds);
-                setSelectedGuildId(guildsRes.selected_guild_id || null);
-              }
-            } else {
-              // Se não está autenticado, verifica se devemos auto-conectar
-              if (autoConnectEnabled && !isConnecting) {
-                handleConnect();
-              } else {
-                setStatusMessage(t("connect"));
-              }
-            }
-          }
-        } else {
-          setStatusMessage(t("discordNotRunning"));
-        }
-      } catch (e) {
-        console.error("Check status loop error:", e);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    // Roda imediatamente ao abrir
-    checkStatusLoop();
-
-    // Isso faz o menu "descongelar" assim que você abrir o Discord.
-    if (!discordRunning || !isAuthenticated) {
-      intervalId = setInterval(checkStatusLoop, 3000);
-    }
-
-    return () => {
-      if (intervalId) clearInterval(intervalId);
-    };
-  }, [
-    language,
-    discordInstalled,
-    discordRunning,
-    isAuthenticated,
-    autoConnectEnabled,
-  ]);
-
-  // ==================== VOICE STATE SYNC ====================
-
-  useEffect(() => {
-    if (!isAuthenticated) return;
-
-    const syncVoiceState = async () => {
-      try {
-        const voice = await getVoiceState();
-        if (voice.success) setVoiceState(voice);
-      } catch (e) {
-        console.error("Error syncing voice state:", e);
-      }
-    };
-
-    const intervalId = setInterval(syncVoiceState, 5000);
-    return () => clearInterval(intervalId);
-  }, [isAuthenticated]);
-
-  // ==================== HANDLERS ====================
-
-  const handleLaunchDiscord = async () => {
-    setIsLaunching(true);
-    try {
-      const result = await launchDiscord();
-      if (result.success) {
-        setStatusMessage(t("launching"));
-        setTimeout(async () => {
-          const running = await checkDiscordRunning();
-          setDiscordRunning(running.running || false);
-          if (running.running) {
-            setStatusMessage(t("openDiscord"));
-          }
-          setIsLaunching(false);
-        }, 5000);
-      } else {
-        setStatusMessage(result.message || t("error"));
-        setIsLaunching(false);
-      }
-    } catch {
-      setStatusMessage(t("error"));
-      setIsLaunching(false);
-    }
-  };
-
-  const handleLogout = async () => {
-    await logout();
-    setIsAuthenticated(false);
-    setVoiceState(null);
-    setGuilds([]);
-    setChannels([]);
-    setUsername("");
-    setStatusMessage(t("notConnected"));
-  };
-
-  const handleSync = async () => {
-    try {
-      const fullState = await syncFullState();
+      const fullState = await DiscordAPI.syncFullState();
       if (fullState.success) {
-        setVoiceState(fullState);
+        voiceControl.setVoiceState(fullState);
         if (fullState.guilds) setGuilds(fullState.guilds);
-        if (fullState.selected_guild_id)
-          setSelectedGuildId(fullState.selected_guild_id);
+        if (fullState.selected_guild_id) setSelectedGuildId(fullState.selected_guild_id);
         toaster.toast({
           title: `✅ ${t("syncComplete")}`,
           body: `${fullState.members?.length || 0} ${t("membersInChannel")}`,
@@ -1105,133 +140,10 @@ function Content() {
     } catch {
       console.error("Sync error");
     }
-  };
+  }, [voiceControl, setGuilds, setSelectedGuildId, t]);
 
-  const handleToggleMute = async () => {
-    const result = await toggleMute();
-    if (result.success) {
-      setVoiceState((prev) =>
-        prev ? { ...prev, is_muted: result.is_muted } : null,
-      );
-    }
-  };
-
-  const handleToggleDeafen = async () => {
-    const result = await toggleDeafen();
-    if (result.success) {
-      setVoiceState((prev) =>
-        prev
-          ? {
-              ...prev,
-              is_deafened: result.is_deafened,
-              is_muted: result.is_muted,
-            }
-          : null,
-      );
-    }
-  };
-
-  const handleLeaveVoice = async () => {
-    const result = await leaveVoice();
-    if (result.success) {
-      setVoiceState((prev) =>
-        prev
-          ? { ...prev, in_voice: false, channel_name: null, members: [] }
-          : null,
-      );
-    }
-  };
-
-  const handleInputVolume = async (value: number) => {
-    const result = await setInputVolume(Math.round(value));
-    if (result.success) {
-      // Usar o volume retornado pelo backend (que foi verificado)
-      setVoiceState((prev) =>
-        prev ? { ...prev, input_volume: result.volume ?? value } : null,
-      );
-    } else {
-      // Reverter para o valor anterior se falhou
-      console.error("Falha ao definir volume de entrada:", result.message);
-    }
-  };
-
-  const handleOutputVolume = async (value: number) => {
-    const result = await setOutputVolume(Math.round(value));
-    if (result.success) {
-      // Usar o volume retornado pelo backend (que foi verificado)
-      setVoiceState((prev) =>
-        prev ? { ...prev, output_volume: result.volume ?? value } : null,
-      );
-    } else {
-      // Reverter para o valor anterior se falhou
-      console.error("Falha ao definir volume de saída:", result.message);
-    }
-  };
-
-  const handleSelectGuild = async (guildId: string) => {
-    await selectGuild(guildId);
-    setSelectedGuildId(guildId);
-    setShowGuildPicker(false);
-
-    const channelsRes = await getVoiceChannels(guildId);
-    if (channelsRes.success) {
-      setChannels(channelsRes.channels);
-      setShowChannelPicker(true);
-    }
-  };
-
-  const handleLoadChannels = async () => {
-    const guildId = selectedGuildId || voiceState?.guild_id || undefined;
-    const result = await getVoiceChannels(guildId);
-    if (result.success) {
-      setChannels(result.channels);
-      setShowChannelPicker(true);
-    }
-  };
-
-  const handleJoinChannel = async (channelId: string) => {
-    const result = await joinVoiceChannel(channelId);
-    if (result.success) {
-      setShowChannelPicker(false);
-      const voice = await getVoiceState();
-      if (voice.success) setVoiceState(voice);
-    }
-  };
-
-  const handleUserVolumeChange = async (userId: string, volume: number) => {
-    await setUserVolume(userId, Math.round(volume));
-    const newVolumes = { ...userVolumes, [userId]: volume };
-    setUserVolumes(newVolumes);
-    await saveSettings({ user_volumes: newVolumes });
-  };
-
-  const handleUserMuteToggle = async (userId: string, muted: boolean) => {
-    await muteUser(userId, muted);
-  };
-
-  const handleNotificationsChange = async (enabled: boolean) => {
-    setNotificationsEnabled(enabled);
-    await saveSettings({ notifications_enabled: enabled });
-  };
-
-  const handleAutoConnectChange = async (enabled: boolean) => {
-    setAutoConnectEnabled(enabled);
-    await saveSettings({ auto_connect: enabled });
-  };
-
-  const handleSteamSyncChange = async (enabled: boolean) => {
-    setSteamSyncEnabled(enabled);
-    await saveSettings({ game_sync_enabled: enabled });
-  };
-
-  const handleLanguageChange = async (lang: Language) => {
-    setLanguage(lang);
-    await saveSettings({ language: lang });
-  };
-
-  // ==================== RENDER: LOADING ====================
-
-  if (isLoading) {
+  // Render: Loading state
+  if (connection.isLoading) {
     return (
       <PanelSection title="Discord Lite">
         <PanelSectionRow>
@@ -1243,9 +155,8 @@ function Content() {
     );
   }
 
-  // ==================== RENDER: DISCORD NOT INSTALLED ====================
-
-  if (!discordInstalled) {
+  // Render: Discord not installed
+  if (!connection.discordInstalled) {
     return (
       <PanelSection title="Discord Lite">
         <PanelSectionRow>
@@ -1260,9 +171,8 @@ function Content() {
     );
   }
 
-  // ==================== RENDER: DISCORD NOT RUNNING ====================
-
-  if (!discordRunning && !isAuthenticated) {
+  // Render: Discord not running
+  if (!connection.discordRunning && !connection.isAuthenticated) {
     return (
       <PanelSection title="Discord Lite">
         <PanelSectionRow>
@@ -1274,42 +184,41 @@ function Content() {
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            onClick={handleLaunchDiscord}
-            disabled={isLaunching}
+            onClick={connection.handleLaunchDiscord}
+            disabled={connection.isLaunching}
           >
-            {isLaunching ? `⏳ ${t("launching")}` : `🚀 ${t("launchDiscord")}`}
+            {connection.isLaunching ? `⏳ ${t("launching")}` : `🚀 ${t("launchDiscord")}`}
           </ButtonItem>
         </PanelSectionRow>
 
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            onClick={handleConnect}
-            disabled={isConnecting}
+            onClick={connection.handleConnect}
+            disabled={connection.isConnecting}
           >
-            {isConnecting ? `⏳ ${t("connecting")}` : `🔗 ${t("connect")}`}
+            {connection.isConnecting ? `⏳ ${t("connecting")}` : `🔗 ${t("connect")}`}
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
     );
   }
 
-  // ==================== RENDER: NOT AUTHENTICATED ====================
-
-  if (!isAuthenticated) {
+  // Render: Not authenticated
+  if (!connection.isAuthenticated) {
     return (
       <PanelSection title="Discord Lite">
         <PanelSectionRow>
-          <div style={styles.statusBadge(false)}>🔌 {statusMessage}</div>
+          <div style={styles.statusBadge(false)}>🔌 {connection.statusMessage}</div>
         </PanelSectionRow>
 
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            onClick={handleConnect}
-            disabled={isConnecting}
+            onClick={connection.handleConnect}
+            disabled={connection.isConnecting}
           >
-            {isConnecting
+            {connection.isConnecting
               ? `⏳ ${t("connecting")}`
               : `🔗 ${t("connectToDiscord")}`}
           </ButtonItem>
@@ -1322,9 +231,9 @@ function Content() {
     );
   }
 
-  // ==================== RENDER: AUTHENTICATED ====================
-
+  // Render: Authenticated (main UI)
   const selectedGuild = guilds.find((g) => g.id === selectedGuildId);
+  const { voiceState } = voiceControl;
 
   return (
     <Fragment>
@@ -1333,7 +242,7 @@ function Content() {
         <PanelSectionRow>
           <div style={styles.statusBadge(true)}>
             <span>✅</span>
-            <span>{username || t("connected")}</span>
+            <span>{connection.username || t("connected")}</span>
           </div>
         </PanelSectionRow>
 
@@ -1361,7 +270,7 @@ function Content() {
             )}
             onActivate={() => {
               if (!voiceState?.is_deafened) {
-                handleToggleMute();
+                voiceControl.toggleMute();
               }
             }}
             onFocus={() => setMuteFocused(true)}
@@ -1383,7 +292,7 @@ function Content() {
               !voiceState?.is_deafened,
               deafenFocused,
             )}
-            onActivate={handleToggleDeafen}
+            onActivate={voiceControl.toggleDeafen}
             onFocus={() => setDeafenFocused(true)}
             onBlur={() => setDeafenFocused(false)}
           >
@@ -1402,7 +311,7 @@ function Content() {
             min={0}
             max={100}
             step={5}
-            onChange={handleInputVolume}
+            onChange={voiceControl.setInputVolume}
             showValue
           />
         </PanelSectionRow>
@@ -1414,7 +323,7 @@ function Content() {
             min={0}
             max={200}
             step={5}
-            onChange={handleOutputVolume}
+            onChange={voiceControl.setOutputVolume}
             showValue
           />
         </PanelSectionRow>
@@ -1536,7 +445,7 @@ function Content() {
       <PanelSection title={`📢 ${t("voiceChannel")}`}>
         {!showChannelPicker ? (
           <PanelSectionRow>
-            <ButtonItem layout="below" onClick={handleLoadChannels}>
+            <ButtonItem layout="below" onClick={() => handleLoadChannels(voiceState)}>
               🔊 {t("selectChannel")}
             </ButtonItem>
           </PanelSectionRow>
@@ -1581,7 +490,7 @@ function Content() {
 
         {voiceState?.in_voice && (
           <PanelSectionRow>
-            <ButtonItem layout="below" onClick={handleLeaveVoice}>
+            <ButtonItem layout="below" onClick={voiceControl.leaveVoice}>
               📴 {t("leaveChannel")}
             </ButtonItem>
           </PanelSectionRow>
@@ -1599,9 +508,9 @@ function Content() {
               <MemberItem
                 key={member.user_id}
                 member={member}
-                savedVolume={userVolumes[member.user_id]}
+                savedVolume={settings.userVolumes[member.user_id]}
                 isSpeaking={voiceState.speaking_users?.includes(member.user_id)}
-                onVolumeChange={handleUserVolumeChange}
+                onVolumeChange={updateUserVolume}
                 onMuteToggle={handleUserMuteToggle}
                 expanded={expandedMember === member.user_id}
                 onToggleExpand={() =>
@@ -1633,7 +542,7 @@ function Content() {
                 label={t("notifications")}
                 description={t("notificationsDesc")}
                 checked={notificationsEnabled}
-                onChange={handleNotificationsChange}
+                onChange={updateNotifications}
               />
             </PanelSectionRow>
 
@@ -1642,7 +551,7 @@ function Content() {
                 label={t("autoConnect")}
                 description={t("autoConnectDesc")}
                 checked={autoConnectEnabled}
-                onChange={handleAutoConnectChange}
+                onChange={updateAutoConnect}
               />
             </PanelSectionRow>
 
@@ -1650,8 +559,8 @@ function Content() {
               <ToggleField
                 label={t("steamSync")}
                 description={t("steamSyncDesc")}
-                checked={steamSyncEnabled}
-                onChange={handleSteamSyncChange}
+                checked={settings.steamSyncEnabled}
+                onChange={updateSteamSync}
               />
             </PanelSectionRow>
 
@@ -1663,7 +572,7 @@ function Content() {
                   { label: "English", data: "en" },
                 ]}
                 selectedOption={language}
-                onChange={(opt) => handleLanguageChange(opt.data as Language)}
+                onChange={(opt) => updateLanguage(opt.data as Language)}
               />
             </PanelSectionRow>
           </Fragment>
@@ -1679,7 +588,7 @@ function Content() {
         </PanelSectionRow>
 
         <PanelSectionRow>
-          <ButtonItem layout="below" onClick={handleLogout}>
+          <ButtonItem layout="below" onClick={connection.handleLogout}>
             🚪 {t("disconnect")}
           </ButtonItem>
         </PanelSectionRow>
@@ -1688,7 +597,7 @@ function Content() {
   );
 }
 
-// ==================== PLUGIN EXPORT ====================
+// Plugin Export & Event Polling
 
 let eventPollingInterval: ReturnType<typeof setInterval> | null = null;
 let notificationsEnabled = true;
@@ -1699,13 +608,13 @@ const startEventPolling = () => {
 
   const pollEvents = async () => {
     try {
-      const settings = await getSettings();
+      const settings = await DiscordAPI.getSettings();
       notificationsEnabled = settings.settings?.notifications_enabled ?? true;
       currentLanguage = settings.settings?.language ?? "pt";
 
       if (!notificationsEnabled) return;
 
-      const result = await getPendingEvents();
+      const result = await DiscordAPI.getPendingEvents();
       if (result.success && result.events.length > 0) {
         const t = translations[currentLanguage];
 
