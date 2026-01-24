@@ -10,6 +10,9 @@ import {
 import { definePlugin, toaster } from "@decky/api";
 import { useState, useCallback, Fragment, useRef } from "react";
 
+// Plugin version
+const PLUGIN_VERSION = "1.4.0";
+
 // Import types
 import type {
   Language,
@@ -566,7 +569,7 @@ export default definePlugin(() => {
 
   return {
     name: "Discord Lite",
-    titleView: <div className={staticClasses.Title}>Discord Lite</div>,
+    titleView: <div className={staticClasses.Title}>Discord Lite v{PLUGIN_VERSION}</div>,
     content: <Content />,
     icon: (
       <svg width="1em" height="1em" viewBox="0 0 24 24" fill="currentColor">
