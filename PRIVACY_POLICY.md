@@ -74,7 +74,7 @@ We implement security best practices:
 You have the right to:
 - **Revoke Access**: Disconnect the Plugin from your Discord account at any time via Discord Settings → Authorized Apps
 - **Delete Data**: Uninstall the Plugin to remove all locally stored data
-- **Access Source Code**: Review our open-source code at https://github.com/[your-username]/Discord-Lite
+- **Access Source Code**: Review our open-source code at https://github.com/lopesleo/Discord-Lite
 - **Opt-Out**: Simply uninstall the Plugin to stop all data access
 
 ## Children's Privacy
@@ -102,7 +102,7 @@ Since we don't collect or store data on external servers:
 ## Contact Us
 
 If you have questions about this Privacy Policy or our privacy practices:
-- Open an issue on GitHub: https://github.com/[your-username]/Discord-Lite/issues
+- Open an issue on GitHub: https://github.com/lopesleo/Discord-Lite/issues
 - Review our source code for transparency
 
 ## Compliance
