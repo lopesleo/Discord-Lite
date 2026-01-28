@@ -90,7 +90,7 @@ We may update this Privacy Policy from time to time. Changes will be posted in t
 Discord Lite is open-source software. You can review our complete source code to verify our privacy practices:
 - Frontend: `src/index.tsx`
 - Backend: `main.py`
-- Repository: https://github.com/[your-username]/Discord-Lite
+- Repository: https://github.com/lopesleo/Discord-Lite
 
 ## Data Retention
 
