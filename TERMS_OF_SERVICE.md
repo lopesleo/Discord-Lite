@@ -68,7 +68,7 @@ You may stop using the Plugin at any time by uninstalling it from Decky Loader. 
 ## 12. Contact
 
 For questions about these Terms, please open an issue on our GitHub repository:
-https://github.com/[your-username]/Discord-Lite/issues
+https://github.com/lopesleo/Discord-Lite/issues
 
 ## 13. Governing Law
 
