@@ -1,6 +1,6 @@
 {
   "name": "Discord-Lite",
-  "version": "1.3.0",
+  "version": "1.4.1",
   "description": "A template to quickly create decky plugins from scratch, based on TypeScript and webpack",
   "type": "module",
   "scripts": {
@@ -19,7 +19,7 @@
     "steam-deck",
     "deck"
   ],
-  "author": "You <you@you.tld>",
+  "author": "lopesleo <lopesleo.dev@gmail.com>",
   "license": "BSD-3-Clause",
   "bugs": {
     "url": "https://github.com/SteamDeckHomebrew/decky-plugin-template/issues"

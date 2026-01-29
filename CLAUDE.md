@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Discord Lite is a Decky Loader plugin for Steam Deck that provides Discord voice chat controls from the Quick Access Menu. It enables voice channel management, member volume control, and game status synchronization.
 
+**Architecture**: Refactored modular design (v1.4.0+) with clean separation of concerns. Main plugin file delegates to specialized backend modules.
+
 ## Build Commands
 
 ```bash
@@ -42,15 +44,43 @@ pnpm run watch
 - Communicates with backend via `callable()` from @decky/api
 - Bilingual support (EN/PT) with inline translations
 
-### Backend (main.py)
-- Python async plugin for Decky Loader
-- **DiscordRPC class**: Manages IPC socket connection to Discord client
-- **Plugin class**: Exposes 30+ async methods callable from frontend
-- OAuth2 PKCE authentication (no client_secret required)
+### Backend (main.py + backend/)
+- **main.py**: Plugin class exposing 30+ async methods to frontend (762 lines)
+- **backend/discord_rpc/**: IPC client, protocol, event system
+- **backend/auth/**: OAuth2 PKCE flow, token management
+- **backend/voice/**: Volume conversion, voice controller, member tracking
+- **backend/steam/**: Game detection, Discord activity sync
+- **backend/polling/**: Background thread with adaptive intervals
+- **backend/utils/**: Cache, settings, socket finder
 
 ### Communication Flow
 ```
-Frontend (React) → callable("method_name") → Python async method → Discord IPC socket
+Frontend (React) → callable("method_name") → Plugin.method() → Backend modules → Discord IPC
+```
+
+### Module Structure
+```
+backend/
+├── discord_rpc/     # IPC communication layer
+│   ├── client.py           # DiscordRPCClient
+│   ├── protocol.py         # Message encoding/decoding
+│   └── events.py           # Event processing, speaking tracker
+├── auth/            # Authentication & tokens
+│   ├── oauth.py            # OAuth2Manager (PKCE)
+│   └── token_manager.py    # TokenManager
+├── voice/           # Voice control
+│   ├── volume.py           # Perceptual ↔ amplitude conversion
+│   ├── controller.py       # VoiceController
+│   └── members.py          # MemberTracker (join/leave detection)
+├── steam/           # Steam integration
+│   ├── game_detector.py    # SteamGameDetector
+│   └── activity_sync.py    # ActivitySyncManager
+├── polling/         # Background tasks
+│   └── voice_poller.py     # VoicePoller thread
+└── utils/           # Shared utilities
+    ├── cache.py            # LRUCache
+    ├── settings.py         # SettingsManager
+    └── socket_finder.py    # find_discord_ipc_socket()
 ```
 
 ### Key RPC Commands to Discord
@@ -78,12 +108,14 @@ Discord RPC expects values to be sent directly (0-100 for input, 0-200 for outpu
 
 ## File Structure
 
-| File | Purpose |
-|------|---------|
-| `main.py` | Python backend - DiscordRPC client + Plugin class |
+| File/Directory | Purpose |
+|----------------|---------|
+| `main.py` | Plugin class - exposes async API to frontend (762 lines) |
+| `backend/` | Modular backend components (14 modules, ~1200 lines total) |
 | `src/index.tsx` | React frontend - UI components + RPC callables |
 | `plugin.json` | Decky plugin metadata |
 | `lib/pypresence/` | Vendored Discord RPC library |
+| `REFACTOR_MIGRATION.md` | Refactoring documentation and migration guide |
 
 ## Debugging
 

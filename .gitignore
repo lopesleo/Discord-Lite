@@ -57,3 +57,10 @@ cli/
 cli/*
 cli/decky
 *.zip
+
+# Temporary files and build artifacts
+*.backup
+main.py.backup
+temp_build/
+temp_release/
+install_deck.sh

@@ -23,6 +23,48 @@ $RemoteZipPath = "/home/deck/plugin.zip"
 
 Write-Host " Building package for $PluginFolder ($Version)..." -ForegroundColor Cyan
 
+# --- CODE VERIFICATION ---
+Write-Host " Verifying code integrity..." -ForegroundColor Yellow
+
+# Check if Python is available
+if (Get-Command python -ErrorAction SilentlyContinue) {
+    # Compile main.py
+    $compileResult = & python -m py_compile main.py 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host " ERROR: main.py has syntax errors!" -ForegroundColor Red
+        Write-Host $compileResult -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "   [OK] main.py compiled successfully" -ForegroundColor Gray
+
+    # Compile backend modules
+    if (Test-Path "backend") {
+        $compileResult = & python -m compileall -q backend/ 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host " ERROR: Backend modules have syntax errors!" -ForegroundColor Red
+            Write-Host $compileResult -ForegroundColor Red
+            exit 1
+        }
+        Write-Host "   [OK] Backend modules compiled successfully" -ForegroundColor Gray
+
+        # Check for problematic decky imports
+        $badImports = Get-ChildItem -Path backend -Recurse -Filter "*.py" |
+            Select-String -Pattern "^import decky|^from decky" -SimpleMatch
+
+        if ($badImports) {
+            Write-Host " ERROR: Backend modules should not import decky at module level!" -ForegroundColor Red
+            Write-Host "   Use dependency injection instead." -ForegroundColor Red
+            $badImports | ForEach-Object { Write-Host "   $($_.Path)" -ForegroundColor Red }
+            exit 1
+        }
+        Write-Host "   [OK] No problematic decky imports found" -ForegroundColor Gray
+    }
+
+    Write-Host " Code verification passed!" -ForegroundColor Green
+} else {
+    Write-Host " Warning: Python not found. Skipping code verification." -ForegroundColor DarkYellow
+}
+
 # Definir caminhos
 $ZipPath = Join-Path $PSScriptRoot $ZipFile
 $TempRoot = Join-Path $PSScriptRoot "temp_release"
@@ -51,8 +93,8 @@ foreach ($file in $files) {
     }
 }
 
-# 3. Copiar Pastas (Assets, Dist, Defaults)
-$folders = @('dist', 'defaults', 'assets')
+# 3. Copiar Pastas (Assets, Dist, Defaults, Backend)
+$folders = @('dist', 'defaults', 'assets', 'backend')
 foreach ($folder in $folders) {
     if (Test-Path $folder) {
         Copy-Item $folder -Destination $TempRoot -Recurse -Force

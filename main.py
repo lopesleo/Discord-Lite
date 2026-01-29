@@ -1,874 +1,605 @@
+"""
+Discord Lite - Discord voice control plugin for Steam Deck
+
+Refactored architecture with modular components.
+This file maintains the Plugin class API for Decky Loader compatibility.
+"""
+
 import os
-import json
-import ssl
-import struct
-import socket
-import secrets
+import sys
 import subprocess
-import asyncio
-import threading
-import time
-import glob
-import re
-import urllib.request
-import urllib.error
-from typing import Optional, Dict, List, Callable, Any
-from queue import Queue, Empty
-import hashlib
-import base64
-
-# The decky plugin module is located at decky-loader/plugin
+from typing import Optional, Dict, List, Any
 import decky
-import math
 
+# Add plugin directory to Python path for backend imports
+# This is needed because Decky Loader doesn't always add the plugin directory to sys.path
+plugin_dir = os.path.dirname(os.path.abspath(__file__))
+if plugin_dir not in sys.path:
+    sys.path.insert(0, plugin_dir)
 
-# ==================== VOLUME CONVERSION ====================
-# Discord RPC armazena AMPLITUDE, mas a UI do Discord mostra PERCEPTUAL
-# Calculado empiricamente: amplitude=5 → UI mostra 31% → range ≈ 38dB
-# Para boost (>100%), usamos 6dB como na biblioteca oficial
-
-DEFAULT_VOLUME_DYNAMIC_RANGE_DB = 38  # Calculado empiricamente
-DEFAULT_VOLUME_BOOST_DYNAMIC_RANGE_DB = 6
-
-def perceptual_to_amplitude(perceptual: float, max_value: float = 100) -> float:
-    """Converte volume perceptual (o que o usuário vê) para amplitude (o que o Discord RPC espera)"""
-    if perceptual <= 0:
-        return 0
-    if perceptual >= max_value:
-        return max_value
-
-    # Para output volume (max_value=200), 100% é o normal, 100-200% é boost
-    if max_value > 100:
-        normalized_max = 100.0
-    else:
-        normalized_max = float(max_value)
-
-    if perceptual > normalized_max:
-        # Boost range: para valores acima de 100%
-        db = ((perceptual - normalized_max) / normalized_max) * DEFAULT_VOLUME_BOOST_DYNAMIC_RANGE_DB
-    else:
-        # Range normal: 0-100%
-        db = (perceptual / normalized_max) * DEFAULT_VOLUME_DYNAMIC_RANGE_DB - DEFAULT_VOLUME_DYNAMIC_RANGE_DB
-
-    amplitude = normalized_max * (10 ** (db / 20))
-    return max(0.0, min(float(max_value), amplitude))
-
-def amplitude_to_perceptual(amplitude: float, max_value: float = 100) -> float:
-    """Converte amplitude (o que o Discord RPC retorna) para perceptual (o que o usuário vê)"""
-    if amplitude <= 0:
-        return 0
-    if amplitude >= max_value:
-        return max_value
-
-    # Para output volume (max_value=200), normalized_max é 100
-    if max_value > 100:
-        normalized_max = 100.0
-    else:
-        normalized_max = float(max_value)
-
-    db = 20 * math.log10(amplitude / normalized_max)
-
-    if db > 0:
-        # Boost range: amplitude acima de 100%
-        perceptual = (db / DEFAULT_VOLUME_BOOST_DYNAMIC_RANGE_DB + 1) * normalized_max
-    else:
-        # Range normal
-        perceptual = (DEFAULT_VOLUME_DYNAMIC_RANGE_DB + db) / DEFAULT_VOLUME_DYNAMIC_RANGE_DB * normalized_max
-
-    return max(0.0, min(float(max_value), perceptual))
-
-
-class DiscordRPC:
-    """Cliente Discord RPC com suporte a OAuth2"""
-    
-    def __init__(self, client_id: str):
-        self.client_id = client_id
-        self.socket: Optional[socket.socket] = None
-        self.connected = False
-        self.authenticated = False
-        self.access_token: Optional[str] = None
-        self.user: Optional[Dict] = None
-        self.game_name_cache = {}
-        self.discord_appid_cache = {}
-        # Estado de voz
-        self.is_muted = False
-        self.is_deafened = False
-        self.voice_channel_id: Optional[str] = None
-        self.voice_channel_name: Optional[str] = None
-        self.voice_guild_id: Optional[str] = None
-        self.input_volume = 100
-        self.output_volume = 100
-        
-        # Configurações de voz
-        self.mode_type = "VOICE_ACTIVITY"  # VOICE_ACTIVITY ou PUSH_TO_TALK
-        self.automatic_gain_control = True
-        self.echo_cancellation = True
-        self.noise_suppression = True
-        self.qos = True
-        self.silence_warning = False
-        
-        # Membros do canal
-        self.voice_members: List[Dict] = []
-        
-        # Estado de quem está falando (user_id -> timestamp)
-        self.speaking_users: Dict[str, float] = {}
-    
-    def get_ipc_path(self) -> Optional[str]:
-        """Encontra o socket IPC do Discord"""
-        
-        possible_uids = [1000, os.getuid()]
-        
-        possible_uids = list(set(possible_uids))
-
-        for uid in possible_uids:
-            for i in range(10):
-                possible_paths = [
-                    # Caminho Padrão Flatpak (Steam Deck usa muito isso)
-                    f"/run/user/{uid}/app/com.discordapp.Discord/discord-ipc-{i}",
-                    # Caminho Nativo
-                    f"/run/user/{uid}/discord-ipc-{i}",
-                    # Caminho Temporário
-                    f"/tmp/discord-ipc-{i}",
-                ]
-                
-                for base_path in possible_paths:
-                    if os.path.exists(base_path):
-                        decky.logger.info(f"Discord Lite: Socket encontrado em: {base_path}")
-                        return base_path
-        
-        decky.logger.warning(f"Discord Lite: Nenhum socket encontrado. IDs testados: {possible_uids}")
-        return None
-    
-    def encode_message(self, opcode: int, payload: dict) -> bytes:
-        data = json.dumps(payload).encode('utf-8')
-        header = struct.pack('<II', opcode, len(data))
-        return header + data
-    
-    def decode_message(self, data: bytes) -> tuple:
-        if len(data) < 8:
-            return None, None
-        opcode, length = struct.unpack('<II', data[:8])
-        payload_data = data[8:8+length]
-        try:
-            payload = json.loads(payload_data.decode('utf-8'))
-            return opcode, payload
-        except:
-            return opcode, None
-    
-    def connect(self) -> bool:
-        ipc_path = self.get_ipc_path()
-        if not ipc_path:
-            decky.logger.error("Discord Lite: Socket IPC não encontrado")
-            return False
-        
-        try:
-            self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self.socket.settimeout(60.0)
-            self.socket.connect(ipc_path)
-            
-            handshake = {"v": 1, "client_id": self.client_id}
-            self.socket.send(self.encode_message(0, handshake))
-            
-            response = self.socket.recv(4096)
-            opcode, payload = self.decode_message(response)
-            
-            if payload and payload.get("cmd") == "DISPATCH" and payload.get("evt") == "READY":
-                self.connected = True
-                decky.logger.info("Discord Lite: Conectado ao Discord IPC")
-                return True
-            else:
-                decky.logger.error(f"Discord Lite: Resposta inesperada: {payload}")
-            
-        except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro ao conectar: {e}")
-        
-        return False
-    
-    def send_command(self, cmd: str, args: dict = None, nonce: str = None) -> Optional[Dict]:
-            if not self.socket:
-                return None
-            
-            if nonce is None:
-                nonce = secrets.token_hex(16)
-            
-            payload = {"cmd": cmd, "nonce": nonce}
-            if args:
-                payload["args"] = args
-            
-            try:
-                self.socket.send(self.encode_message(1, payload))
-                response = self.socket.recv(8192)
-                opcode, result = self.decode_message(response)
-                decky.logger.info(f"Discord Lite: Resposta {cmd}: {result}")
-                return result
-            except Exception as e:
-                decky.logger.error(f"Discord Lite: Erro no comando {cmd}: {e}")
-                return None
-    
-    def authorize(self, scopes: list, code_challenge: str = None) -> Optional[str]:
-        args = {
-            "client_id": self.client_id,
-            "scopes": scopes,
-        }
-        
-        # Adiciona PKCE se fornecido
-        if code_challenge:
-            args["code_challenge"] = code_challenge
-            args["code_challenge_method"] = "S256"
-
-        result = self.send_command("AUTHORIZE", args)
-        
-        if result and result.get("data"):
-            return result["data"].get("code")
-        return None
-    
-    def authenticate(self, access_token: str) -> bool:
-        result = self.send_command("AUTHENTICATE", {"access_token": access_token})
-        
-        if result and result.get("data"):
-            self.authenticated = True
-            self.user = result["data"].get("user")
-            self.access_token = access_token
-            decky.logger.info(f"Discord Lite: Autenticado como {self.user.get('username', 'unknown')}")
-            return True
-        
-        decky.logger.error(f"Discord Lite: Falha ao autenticar: {result}")
-        return False
-    
-    def get_voice_settings(self) -> Optional[Dict]:
-        result = self.send_command("GET_VOICE_SETTINGS")
-        if result and result.get("data"):
-            data = result["data"]
-            self.is_muted = data.get("mute", False)
-            self.is_deafened = data.get("deaf", False)
-
-            input_data = data.get("input", {})
-            output_data = data.get("output", {})
-            mode_data = data.get("mode", {})
-
-            if isinstance(input_data, dict):
-                raw_amplitude = float(input_data.get("volume", 100))
-                perceptual = amplitude_to_perceptual(raw_amplitude, 100)
-                decky.logger.info(f"Discord Lite: GET_VOICE_SETTINGS input amplitude={raw_amplitude} perceptual={perceptual}")
-                self.input_volume = int(perceptual)
-
-            if isinstance(output_data, dict):
-                raw_amplitude = float(output_data.get("volume", 100))
-                perceptual = amplitude_to_perceptual(raw_amplitude, 200)
-                decky.logger.info(f"Discord Lite: GET_VOICE_SETTINGS output amplitude={raw_amplitude} perceptual={perceptual}")
-                self.output_volume = int(perceptual)
-            if isinstance(mode_data, dict):
-                self.mode_type = mode_data.get("type", "VOICE_ACTIVITY")
-            
-            self.automatic_gain_control = data.get("automatic_gain_control", True)
-            self.echo_cancellation = data.get("echo_cancellation", True)
-            self.noise_suppression = data.get("noise_suppression", True)
-            self.qos = data.get("qos", True)
-            self.silence_warning = data.get("silence_warning", False)
-            
-            return data
-        return None
-    
-    def set_voice_settings(self, **kwargs) -> dict:
-        """Define configurações de voz e retorna resultado"""
-        result = self.send_command("SET_VOICE_SETTINGS", kwargs)
-        if result:
-            if result.get("evt") == "ERROR":
-                return {"success": False, "message": result.get("data", {}).get("message", "Erro")}
-            return {"success": True, "data": result.get("data")}
-        return {"success": False, "message": "Sem resposta"}
-    
-    def get_selected_voice_channel(self) -> Optional[Dict]:
-        result = self.send_command("GET_SELECTED_VOICE_CHANNEL")
-        if result and result.get("data"):
-            data = result["data"]
-            if data:
-                self.voice_channel_id = data.get("id")
-                self.voice_channel_name = data.get("name")
-                self.voice_guild_id = data.get("guild_id")
-                
-                voice_states = data.get("voice_states", [])
-                self.voice_members = []
-                for vs in voice_states:
-                    user = vs.get("user", {})
-                    member = {
-                        "user_id": user.get("id"),
-                        "username": user.get("username", "Usuário"),
-                        "avatar": user.get("avatar"),
-                        "mute": vs.get("mute", False) or vs.get("self_mute", False),
-                        "deaf": vs.get("deaf", False) or vs.get("self_deaf", False),
-                        "volume": vs.get("volume", 100),
-                    }
-                    self.voice_members.append(member)
-            else:
-                self.voice_channel_id = None
-                self.voice_channel_name = None
-                self.voice_guild_id = None
-                self.voice_members = []
-            return data
-        return None
-    
-    def select_voice_channel(self, channel_id: Optional[str], force: bool = False) -> bool:
-        args = {"channel_id": channel_id}
-        if force:
-            args["force"] = True
-        result = self.send_command("SELECT_VOICE_CHANNEL", args)
-        return result is not None
-    
-    def get_channels(self, guild_id: str) -> List[Dict]:
-        result = self.send_command("GET_CHANNELS", {"guild_id": guild_id})
-        if result and result.get("data"):
-            channels = result["data"].get("channels", [])
-            voice_channels = [c for c in channels if c.get("type") == 2]
-            return voice_channels
-        return []
-    
-    def get_guilds(self) -> List[Dict]:
-        result = self.send_command("GET_GUILDS")
-        if result and result.get("data"):
-            guilds = result["data"].get("guilds", [])
-            # Adiciona URL do ícone para cada servidor
-            for guild in guilds:
-                guild_id = guild.get("id")
-                icon_hash = guild.get("icon")
-                if guild_id and icon_hash:
-                    guild["icon_url"] = f"https://cdn.discordapp.com/icons/{guild_id}/{icon_hash}.png?size=64"
-                else:
-                    guild["icon_url"] = None
-            return guilds
-        return []
-    
-    def set_user_voice_settings(self, user_id: str, volume: int = None, mute: bool = None) -> bool:
-        args = {"user_id": user_id}
-        if volume is not None:
-            args["volume"] = max(0, min(200, volume))
-        if mute is not None:
-            args["mute"] = mute
-        
-        result = self.send_command("SET_USER_VOICE_SETTINGS", args)
-        return result is not None and result.get("cmd") == "SET_USER_VOICE_SETTINGS"
-    
-    def set_activity(self, activity: Dict) -> bool:
-        """Define o status/atividade do usuário"""
-        result = self.send_command("SET_ACTIVITY", {"pid": os.getpid(), "activity": activity})
-        return result is not None
-    
-    def clear_activity(self) -> bool:
-        """Limpa o status/atividade do usuário"""
-        result = self.send_command("SET_ACTIVITY", {"pid": os.getpid(), "activity": None})
-        return result is not None
-    
-    
-    def subscribe(self, event: str, args: dict = None) -> bool:
-        """Inscreve-se em um evento do Discord"""
-        payload = {"cmd": "SUBSCRIBE", "evt": event, "nonce": secrets.token_hex(16)}
-        if args:
-            payload["args"] = args
-        
-        try:
-            self.socket.send(self.encode_message(1, payload))
-            response = self.socket.recv(4096)
-            opcode, result = self.decode_message(response)
-            decky.logger.info(f"Discord Lite: SUBSCRIBE {event}: {result}")
-            return result is not None and result.get("evt") == event
-        except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro ao subscrever {event}: {e}")
-            return False
-    def receive_event(self, timeout: float = 0.1) -> Optional[Dict]:
-        """Recebe evento do Discord (non-blocking)"""
-        try:
-            old_timeout = self.socket.gettimeout()
-            self.socket.settimeout(timeout)
-            response = self.socket.recv(4096)
-            self.socket.settimeout(old_timeout)
-            opcode, payload = self.decode_message(response)
-            
-            # Processa eventos de SPEAKING
-            if payload and payload.get("evt") == "SPEAKING_START":
-                data = payload.get("data", {})
-                user_id = data.get("user_id")
-                if user_id:
-                    self.speaking_users[user_id] = time.time()
-            elif payload and payload.get("evt") == "SPEAKING_STOP":
-                data = payload.get("data", {})
-                user_id = data.get("user_id")
-                if user_id and user_id in self.speaking_users:
-                    del self.speaking_users[user_id]
-            
-            return payload
-        except socket.timeout:
-            return None
-        except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro ao receber evento: {e}")
-            return None
-    
-    def subscribe_speaking_events(self, channel_id: str) -> bool:
-        """Inscreve nos eventos de speaking de um canal"""
-        try:
-            self.subscribe("SPEAKING_START", {"channel_id": channel_id})
-            self.subscribe("SPEAKING_STOP", {"channel_id": channel_id})
-            decky.logger.info(f"Discord Lite: Inscrito em eventos de speaking para canal {channel_id}")
-            return True
-        except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro ao inscrever em speaking events: {e}")
-            return False
-    
-    def get_speaking_users(self) -> List[str]:
-        """Retorna lista de user_ids que estão falando atualmente"""
-        now = time.time()
-        # Remove entradas antigas (> 2 segundos sem atualização)
-        self.speaking_users = {uid: ts for uid, ts in self.speaking_users.items() if now - ts < 2}
-        return list(self.speaking_users.keys())
-    
-    def disconnect(self):
-        if self.socket:
-            try:
-                self.socket.close()
-            except:
-                pass
-            self.socket = None
-        self.connected = False
-        self.authenticated = False
+# Import modular backend components
+from backend.discord_rpc.client import DiscordRPCClient
+from backend.auth.oauth import OAuth2Manager
+from backend.auth.token_manager import TokenManager
+from backend.voice.controller import VoiceController
+from backend.voice.members import MemberTracker
+from backend.voice.volume import perceptual_to_amplitude, amplitude_to_perceptual
+from backend.steam.game_detector import SteamGameDetector
+from backend.steam.activity_sync import ActivitySyncManager
+from backend.polling.voice_poller import VoicePoller
+from backend.utils.settings import SettingsManager
 
 
 class Plugin:
-    """Discord Lite - Controle completo do Discord via Steam Deck"""
-    
+    """
+    Discord Lite - Complete Discord control from Steam Deck.
+
+    Main plugin class that exposes async methods to the frontend.
+    All methods maintain backward compatibility with existing frontend code.
+    """
+
     CLIENT_ID = "1461502476401381446"
     SCOPES = ["rpc", "rpc.voice.read", "rpc.voice.write"]
-    
-    rpc: Optional[DiscordRPC] = None
-    access_token: Optional[str] = None
-    auth_in_progress: bool = False
-    
-    # Servidores e canais em cache
-    guilds_cache: List[Dict] = []
-    selected_guild_id: Optional[str] = None
-    
-    # Cache de membros para detectar entrada/saída
-    previous_members: Dict[str, dict] = {}  # user_id -> info
-    initial_sync_done: bool = False  # Flag para evitar toasts ao conectar
-    
-    # Sistema de polling para eventos
-    voice_polling_active: bool = False
-    voice_polling_thread: Optional[threading.Thread] = None
-    event_queue: Queue = Queue()
-    last_poll_time: float = 0
-    
-    # Sistema de detecção de jogos Steam
-    game_sync_enabled: bool = True
-    current_game_appid: Optional[str] = None
-    current_game_name: Optional[str] = None
-    game_start_time: Optional[int] = None
-    current_game_rpc: Optional[Any] = None  # Conexão RPC com App ID oficial
-    
-    # Cache de aplicativos detectáveis do Discord
-    discord_detectable_apps: List[Dict] = []
-    discord_apps_last_fetch: float = 0
-    discord_apps_cache_duration: float = 86400  # 24 horas
-    
-    def get_token_path(self) -> str:
-        return os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "discord_token.json")
-    
-    def get_settings_path(self) -> str:
-        return os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
-    
-    def save_token(self, access_token: str):
-        try:
-            os.makedirs(decky.DECKY_PLUGIN_SETTINGS_DIR, exist_ok=True)
-            with open(self.get_token_path(), 'w') as f:
-                json.dump({"access_token": access_token}, f)
-            decky.logger.info("Discord Lite: Token salvo")
-        except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro ao salvar token: {e}")
-    
-    def load_token(self) -> Optional[str]:
-        try:
-            path = self.get_token_path()
-            if os.path.exists(path):
-                with open(path, 'r') as f:
-                    # Tenta ler
-                    data = json.load(f)
-                    self.access_token = data.get("access_token")
-                    return self.access_token
-        except json.JSONDecodeError:
-            # CORREÇÃO: Se o arquivo estiver estragado, deleta ele.
-            decky.logger.warning("Discord Lite: Token corrompido detectado. Resetando arquivo.")
-            try: os.remove(path)
-            except: pass
-        except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro ao carregar token: {e}")
-        return None
-    
-    def save_settings(self, settings: dict):
-        try:
-            os.makedirs(decky.DECKY_PLUGIN_SETTINGS_DIR, exist_ok=True)
-            current = self.load_settings()
-            current.update(settings)
-            with open(self.get_settings_path(), 'w') as f:
-                json.dump(current, f)
-        except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro ao salvar settings: {e}")
-    
-    def load_settings(self) -> dict:
-        try:
-            path = self.get_settings_path()
-            if os.path.exists(path):
-                with open(path, 'r') as f:
-                    return json.load(f)
-        except:
-            pass
-        return {}
-    
-    # ==================== STEAM GAME DETECTION ====================
-    GAME_ID_REGEX = re.compile(r'SteamLaunch.*?AppId=(\d+)')
 
-    def get_steam_game_info(self) -> Optional[Dict]:
-        """Detecta o jogo Steam em execução e retorna informações"""
-        try:
-            # Otimização: Listar apenas IDs numéricos em /proc é mais rápido que glob
-            pids = [pid for pid in os.listdir('/proc') if pid.isdigit()]
-            
-            for pid in pids:
-                try:
-                    cmdline_path = f'/proc/{pid}/cmdline'
-                    
-                    # Abre o arquivo cmdline
-                    # O 'errors="ignore"' é importante pois cmdline pode ter bytes estranhos
-                    with open(cmdline_path, 'r', errors='ignore') as f:
-                        cmdline = f.read()
-                    
-                    # --- OTIMIZAÇÃO CRÍTICA ---
-                    # Regex é pesado. Verificação de string simples é muito rápida.
-                    # Se não tiver "SteamLaunch" no texto, pula imediatamente.
-                    if 'SteamLaunch' not in cmdline:
-                        continue
+    def __init__(self):
+        """Initialize plugin with modular components."""
+        # Core components
+        self.rpc_client: Optional[DiscordRPCClient] = None
+        self.voice_controller: Optional[VoiceController] = None
+        self.member_tracker = MemberTracker()
+        self.settings_manager = SettingsManager(decky.DECKY_PLUGIN_SETTINGS_DIR, decky.logger)
+        self.token_manager = TokenManager(decky.DECKY_PLUGIN_SETTINGS_DIR, decky.logger)
+        self.oauth_manager = OAuth2Manager(self.CLIENT_ID, decky.logger)
 
-                    # Ignorar processos do próprio Discord ou Flatpak wrapper
-                    cmdline_lower = cmdline.lower()
-                    if 'discord' in cmdline_lower or 'flatpak' in cmdline_lower:
-                        continue
-                    
-                    # Agora sim, usamos o Regex compilado
-                    match = self.GAME_ID_REGEX.search(cmdline)
-                    if match:
-                        appid = match.group(1)
-                        
-                        # Tentar ler o nome do jogo do arquivo de manifesto
-                        game_name = self.get_game_name_from_appid(appid)
-                        if not game_name:
-                            game_name = f"Game {appid}"
-                        
-                        # Retorna imediatamente ao encontrar o primeiro jogo válido
-                        return {
-                            "appid": appid,
-                            "name": game_name,
-                            "image_url": f"https://steamcdn-a.akamaihd.net/steam/apps/{appid}/header.jpg"
-                        }
-                        
-                except (IOError, PermissionError, FileNotFoundError):
-                    continue
-            
-            return None
-            
-        except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro ao detectar jogo Steam: {e}")
-            return None
-    
-    def get_game_name_from_appid(self, appid: str) -> Optional[str]:
+        # Game sync
+        self.game_detector = SteamGameDetector(decky.logger)
+        self.activity_sync: Optional[ActivitySyncManager] = None
+        self.game_sync_enabled = True
+
+        # Polling system
+        self.voice_poller = VoicePoller(decky.logger)
+
+        # Authentication state
+        self.access_token: Optional[str] = None
+        self.auth_in_progress = False
+
+        # Guild/server selection
+        self.guilds_cache: List[Dict] = []
+        self.selected_guild_id: Optional[str] = None
+
+    # ==================== LIFECYCLE ====================
+
+    async def _main(self):
+        """Plugin initialization."""
+        decky.logger.info("Discord Lite: Initializing plugin...")
+
+        # Load saved token
+        self.access_token = self.token_manager.load()
+
+        # Load settings
+        settings = self.settings_manager.load_settings()
+        self.selected_guild_id = settings.get("selected_guild_id")
+        self.game_sync_enabled = settings.get("game_sync_enabled", True)
+
+        decky.logger.info("Discord Lite: Plugin initialized")
+
+    async def _unload(self):
+        """Plugin cleanup."""
+        decky.logger.info("Discord Lite: Unloading plugin...")
+
+        # Stop polling
+        self.voice_poller.stop()
+
+        # Disconnect RPC
+        if self.rpc_client:
+            self.rpc_client.disconnect()
+
+        # Clear activity sync
+        if self.activity_sync:
+            self.activity_sync.clear()
+
+        decky.logger.info("Discord Lite: Plugin unloaded")
+
+    # ==================== AUTHENTICATION ====================
+
+    async def auto_auth(self) -> dict:
         """
-        Obtém o nome do jogo a partir do AppID.
+        Automatic authentication with Discord.
+
+        Tries saved token first (fast path), then initiates OAuth2 PKCE flow if needed.
+
+        Returns:
+            Dictionary with success status and user info
         """
-        
-        # 1. VERIFICAÇÃO DE CACHE (Velocidade Extrema)
-        if hasattr(self, 'game_name_cache') and appid in self.game_name_cache:
-            return self.game_name_cache[appid]
+        if self.auth_in_progress:
+            return {"success": False, "message": "Authentication already in progress"}
+
+        self.auth_in_progress = True
 
         try:
-            steam_paths = [
-                "/home/deck/.local/share/Steam/steamapps",
-                "/home/deck/.steam/steam/steamapps"
-            ]
-            
-            external_paths = glob.glob("/run/media/*/steamapps")
-            steam_paths.extend(external_paths)
-            
-            for base_path in steam_paths:
-                manifest_path = f"{base_path}/appmanifest_{appid}.acf"
-                
-                if os.path.exists(manifest_path):
-                    try:
-                        with open(manifest_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            content = f.read()
-                            
-                            match = re.search(r'"name"\s+"([^"]+)"', content)
-                            
-                            if match:
-                                name = match.group(1)
-                                
-                                if not hasattr(self, 'game_name_cache'):
-                                    self.game_name_cache = {}
-                                
-                                self._add_to_cache(self.game_name_cache, appid, name, max_size=50)
-                                
-                                return name
-                    except Exception:
-                        continue
-            
-            return None
-            
-        except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro ao obter nome do jogo: {e}")
-            return None
-    
-    def get_cache_path(self) -> str:
-        return os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "discord_apps_cache.json")
+            # Load token if not already loaded
+            if not self.access_token:
+                self.access_token = self.token_manager.load()
 
-    def load_discord_detectable_apps(self):
-        """Carrega lista de aplicativos detectáveis do Discord (com cache de 24h persistente)"""
-        try:
-            import ssl
-            
-            current_time = time.time()
-            
-            # 1. Verificar cache em memória
-            if self.discord_detectable_apps and (current_time - self.discord_apps_last_fetch) < self.discord_apps_cache_duration:
-                return self.discord_detectable_apps
-            
-            # 2. Verificar cache em disco (se memória estiver vazia ou expirada)
-            cache_path = self.get_cache_path()
-            if os.path.exists(cache_path):
-                try:
-                    with open(cache_path, 'r') as f:
-                        cache_data = json.load(f)
-                        last_fetch = cache_data.get("last_fetch", 0)
-                        
-                        if (current_time - last_fetch) < self.discord_apps_cache_duration:
-                            self.discord_detectable_apps = cache_data.get("apps", [])
-                            self.discord_apps_last_fetch = last_fetch
-                            decky.logger.info(f"Discord Lite: Carregados {len(self.discord_detectable_apps)} apps do cache em disco")
-                            return self.discord_detectable_apps
-                except Exception as e:
-                    decky.logger.warning(f"Discord Lite: Erro ao ler cache em disco: {e}")
-            
-            # 3. Buscar da API do Discord (se cache inválido)
-            decky.logger.info("Discord Lite: Buscando lista de apps detectáveis do Discord (Web)...")
-            req = urllib.request.Request(
-                "https://discord.com/api/v10/applications/detectable",
-                headers={"User-Agent": "DiscordLite/1.0"}
-            )
-            
-            # Criar contexto SSL que não verifica certificados (necessário no Steam Deck)
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            
-            with urllib.request.urlopen(req, timeout=10, context=ctx) as response:
-                data = json.loads(response.read().decode('utf-8'))
-                self.discord_detectable_apps = data
-                self.discord_apps_last_fetch = current_time
-                
-                # Salvar em disco
-                try:
-                    os.makedirs(decky.DECKY_PLUGIN_SETTINGS_DIR, exist_ok=True)
-                    with open(cache_path, 'w') as f:
-                        json.dump({
-                            "last_fetch": current_time,
-                            "apps": data
-                        }, f)
-                    decky.logger.info(f"Discord Lite: Cache salvo em disco com {len(data)} apps")
-                except Exception as e:
-                    decky.logger.error(f"Discord Lite: Erro ao salvar cache em disco: {e}")
-                
-                return data
-        
-        except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro ao buscar apps detectáveis: {e}")
-            return self.discord_detectable_apps  # Retornar cache antigo se houver
-    
-    def find_discord_app_id(self, game_name: str) -> Optional[str]:
-        """
-        Busca o App ID oficial do Discord para um jogo pelo nome.
-        """
-        
-        # 1. VERIFICAÇÃO DE CACHE
-        if hasattr(self, 'discord_appid_cache') and game_name in self.discord_appid_cache:
-            return self.discord_appid_cache[game_name]
+            # Create RPC client
+            self.rpc_client = DiscordRPCClient(self.CLIENT_ID, decky.logger)
 
-        try:
-            apps = self.load_discord_detectable_apps()
-            
-            if not apps:
-                return None
-            
-            if not hasattr(self, 'discord_appid_cache'):
-                self.discord_appid_cache = {}
+            # Connect to Discord IPC
+            if not self.rpc_client.connect():
+                return {"success": False, "message": "Discord not running or socket not found"}
 
-            target_name = game_name.lower()
-            
-            for app in apps:
-                if app.get("name", "").lower() == target_name:
-                    app_id = app.get("id")
-                    
-                    self._add_to_cache(self.discord_appid_cache, game_name, app_id, max_size=100)
-                    
-                    decky.logger.info(f"Discord Lite: Match exato encontrado! {game_name} -> {app_id}")
-                    return app_id
-            
-            for app in apps:
-                app_name = app.get("name", "").lower()
-                
-                if target_name in app_name or app_name in target_name:
-                    app_id = app.get("id")
-                    
-                    self._add_to_cache(self.discord_appid_cache, game_name, app_id, max_size=100)
-                    
-                    decky.logger.info(f"Discord Lite: Match parcial encontrado! {game_name} -> {app_id}")
-                    return app_id
-            
-            self._add_to_cache(self.discord_appid_cache, game_name, None, max_size=100)
-            
-            return None
-            
-        except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro ao buscar App ID do Discord: {e}")
-            return None
-    
-    def sync_game_to_discord(self):
-        """Sincroniza o jogo atual com o status do Discord"""
-        if not self.rpc:
-            return
+            # Try saved token first (fast login)
+            if self.access_token:
+                decky.logger.info("Discord Lite: Attempting login with saved token...")
 
-        if not self.game_sync_enabled:
-            if self.current_game_appid:
-                decky.logger.info("Discord Lite: Sync desativado pelo usuário. Limpando status...")
-                
-                # 1. Fechar RPC específico do jogo (se houver)
-                if hasattr(self, 'current_game_rpc') and self.current_game_rpc:
-                    try:
-                        self.current_game_rpc.close()
-                    except: pass
-                    self.current_game_rpc = None
-                
-                # 2. Limpar RPC principal
-                try:
-                    self.rpc.clear_activity()
-                except: pass
-                
-                # 3. Resetar variáveis locais
-                self.current_game_appid = None
-                self.current_game_name = None
-                self.game_start_time = None
-                
-            return
-        
-        try:
-            game_info = self.get_steam_game_info()
-            
-            # --- CENÁRIO 1: Jogo mudou ---
-            if game_info and game_info["appid"] != self.current_game_appid:
-                
-                if hasattr(self, 'current_game_rpc') and self.current_game_rpc:
-                    try:
-                        decky.logger.info("Discord Lite: Fechando conexão RPC do jogo anterior...")
-                        self.current_game_rpc.close()
-                    except Exception as e:
-                        decky.logger.warning(f"Discord Lite: Erro ao fechar RPC anterior: {e}")
-                    finally:
-                        self.current_game_rpc = None
-
-                # Atualiza variaveis de estado
-                self.current_game_appid = game_info["appid"]
-                self.current_game_name = game_info["name"]
-                self.game_start_time = int(time.time())
-                
-                # Buscar App ID oficial
-                discord_app_id = self.find_discord_app_id(game_info["name"])
-                
-                # Definir textos
-                details = game_info["name"]
-                state = "Playing on Steam Deck"
-                
-                if discord_app_id:
-                    details = "Playing on Steam Deck"
-                    state = None # Em app oficial, o nome do jogo é o título da janela do Discord
-                
-                # Montar payload
-                activity = {
-                    "details": details,
-                    "timestamps": { "start": self.game_start_time },
-                    "assets": {
-                        "large_image": game_info["image_url"],
-                        "large_text": game_info["name"],
-                        "small_image": "https://steamcdn-a.akamaihd.net/steamcommunity/public/images/avatars/8d/8dd66ce1b9590825cebdce861c372cc3f5187f2e_full.jpg",
-                        "small_text": "Steam Deck"
+                if self.rpc_client.authenticate(self.access_token):
+                    self._post_authentication_setup()
+                    return {
+                        "success": True,
+                        "authenticated": True,
+                        "user": self.rpc_client.user,
+                        "message": f"Connected as {self.rpc_client.user.get('username', 'User')}"
                     }
+                else:
+                    decky.logger.warning("Discord Lite: Saved token expired or invalid")
+                    self.access_token = None
+
+            # Initiate OAuth2 PKCE flow
+            decky.logger.info("Discord Lite: Starting OAuth2 PKCE flow...")
+
+            verifier, challenge = self.oauth_manager.generate_pkce_pair()
+
+            # Request authorization (opens dialog in Discord)
+            code = self.rpc_client.authorize(self.SCOPES, challenge)
+
+            if not code:
+                return {"success": False, "message": "Authorization declined by user"}
+
+            # Exchange code for token
+            exchange_result = self.oauth_manager.exchange_code_for_token(code, verifier)
+
+            if not exchange_result.get("success"):
+                return exchange_result
+
+            # Reconnect with new token
+            self.rpc_client.disconnect()
+            self.rpc_client = DiscordRPCClient(self.CLIENT_ID, decky.logger)
+
+            if not self.rpc_client.connect():
+                return {"success": False, "message": "Failed to reconnect after authentication"}
+
+            new_token = exchange_result["access_token"]
+
+            if self.rpc_client.authenticate(new_token):
+                self.access_token = new_token
+                self.token_manager.save(new_token)
+                self._post_authentication_setup()
+
+                return {
+                    "success": True,
+                    "authenticated": True,
+                    "user": self.rpc_client.user
                 }
-                if state:
-                    activity["state"] = state
-                
-                # TENTATIVA DE CONEXÃO
-                connected_official = False
-                
-                if discord_app_id:
-                    try:
-                        decky.logger.info(f"Discord Lite: Tentando App ID oficial: {discord_app_id}")
-                        official_rpc = DiscordRPC(discord_app_id)
-                        
-                        if official_rpc.connect():
-                            official_rpc.set_activity(activity)
-                            self.current_game_rpc = official_rpc
-                            connected_official = True
-                            
-                            # Limpa o RPC principal para não duplicar
-                            try: self.rpc.clear_activity()
-                            except: pass
-                            
-                            decky.logger.info(f"Discord Lite: Conectado via App ID oficial.")
-                        else:
-                            decky.logger.warning("Discord Lite: Falha na conexão do RPC oficial.")
-                            
-                    except Exception as e:
-                        decky.logger.error(f"Discord Lite: Erro no RPC oficial: {e}")
-                
-                if not connected_official:
-                    if discord_app_id and not state: 
-                         activity["state"] = "Playing on Steam Deck"
 
-                    # Usa o RPC do próprio plugin (Deckord)
-                    try:
-                        self.rpc.set_activity(activity)
-                        decky.logger.info(f"Discord Lite: Usando fallback para {game_info['name']}")
-                    except Exception as e:
-                        decky.logger.error(f"Discord Lite: Falha no fallback: {e}")
+            return {"success": False, "message": "Final authentication failed"}
 
-            elif not game_info and self.current_game_appid:
-                self.current_game_appid = None
-                self.current_game_name = None
-                self.game_start_time = None
-                
-                if hasattr(self, 'current_game_rpc') and self.current_game_rpc:
-                    try:
-                        self.current_game_rpc.close()
-                    except:
-                        pass
-                    self.current_game_rpc = None
-                
-                try:
-                    self.rpc.clear_activity()
-                except:
-                    pass
-                    
-                decky.logger.info("Discord Lite: Jogo fechado, status limpo")
-        
         except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro crítico no loop de sync: {e}")
-    
-    # ==================== SETTINGS API ====================
-    
+            decky.logger.error(f"Discord Lite: Authentication error: {e}")
+            return {"success": False, "message": str(e)}
+
+        finally:
+            self.auth_in_progress = False
+
+    def _post_authentication_setup(self):
+        """Setup components after successful authentication."""
+        # Create voice controller
+        self.voice_controller = VoiceController(self.rpc_client, decky.logger)
+
+        # Create activity sync manager
+        self.activity_sync = ActivitySyncManager(
+            decky.DECKY_PLUGIN_SETTINGS_DIR,
+            self.rpc_client,
+            decky.logger
+        )
+
+        # Start polling
+        self._start_voice_polling()
+
+    async def logout(self) -> dict:
+        """
+        Logout and clear saved token.
+
+        Returns:
+            Dictionary with success status
+        """
+        self.access_token = None
+        self.token_manager.delete()
+
+        if self.rpc_client:
+            self.rpc_client.authenticated = False
+            self.rpc_client.access_token = None
+
+        # Stop polling
+        self.voice_poller.stop()
+
+        return {"success": True, "message": "Logged out"}
+
+    async def check_status(self) -> dict:
+        """
+        Check connection and authentication status.
+
+        Returns:
+            Dictionary with connection status and user info
+        """
+        if not self.rpc_client or not self.rpc_client.connected:
+            return {
+                "success": False,
+                "connected": False,
+                "authenticated": False,
+                "message": "Not connected"
+            }
+
+        return {
+            "success": True,
+            "connected": True,
+            "authenticated": self.rpc_client.authenticated,
+            "user": self.rpc_client.user if self.rpc_client.authenticated else None,
+            "message": "Connected" if self.rpc_client.authenticated else "Not authenticated"
+        }
+
+    # ==================== DISCORD LAUNCHER ====================
+
+    async def check_discord_installed(self) -> dict:
+        """
+        Check if Discord is installed on the system.
+
+        Returns:
+            Dictionary with installation status
+        """
+        flatpak_path = os.path.expanduser("~/.var/app/com.discordapp.Discord")
+        flatpak_installed = os.path.exists(flatpak_path)
+
+        native_paths = [
+            "/usr/bin/discord",
+            "/usr/bin/Discord",
+            os.path.expanduser("~/Discord/Discord")
+        ]
+        native_installed = any(os.path.exists(p) for p in native_paths)
+
+        return {
+            "success": True,
+            "installed": flatpak_installed or native_installed,
+            "flatpak": flatpak_installed,
+            "native": native_installed
+        }
+
+    async def launch_discord(self) -> dict:
+        """
+        Launch Discord application.
+
+        Returns:
+            Dictionary with success status
+        """
+        try:
+            # Try Flatpak first
+            flatpak_path = os.path.expanduser("~/.var/app/com.discordapp.Discord")
+            if os.path.exists(flatpak_path):
+                subprocess.Popen(
+                    ["flatpak", "run", "com.discordapp.Discord"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+                return {"success": True, "message": "Discord launched (Flatpak)"}
+
+            # Try native installation
+            for path in ["/usr/bin/discord", "/usr/bin/Discord"]:
+                if os.path.exists(path):
+                    subprocess.Popen(
+                        [path],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True
+                    )
+                    return {"success": True, "message": "Discord launched"}
+
+            return {"success": False, "message": "Discord not found"}
+
+        except Exception as e:
+            decky.logger.error(f"Discord Lite: Error launching Discord: {e}")
+            return {"success": False, "message": str(e)}
+
+    async def check_discord_running(self) -> dict:
+        """
+        Check if Discord is currently running.
+
+        Returns:
+            Dictionary with running status
+        """
+        try:
+            temp_rpc = DiscordRPCClient(self.CLIENT_ID, decky.logger)
+            from backend.utils.socket_finder import find_discord_ipc_socket
+
+            ipc_path = find_discord_ipc_socket(decky.logger)
+            is_running = ipc_path is not None
+
+            return {"success": True, "running": is_running}
+
+        except Exception as e:
+            decky.logger.error(f"Discord Lite: Error checking if Discord is running: {e}")
+            return {"success": False, "running": False}
+
+    # ==================== VOICE CONTROL ====================
+
+    async def get_voice_state(self) -> dict:
+        """
+        Get current voice state including settings and channel info.
+
+        Returns:
+            Dictionary with voice state
+        """
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated", "authenticated": False}
+
+        self.voice_controller.get_voice_settings()
+        self.voice_controller.get_selected_voice_channel()
+
+        speaking_users = self.rpc_client.get_speaking_users()
+
+        return {
+            "success": True,
+            "authenticated": True,
+            "is_muted": self.voice_controller.is_muted,
+            "is_deafened": self.voice_controller.is_deafened,
+            "input_volume": self.voice_controller.input_volume,
+            "output_volume": self.voice_controller.output_volume,
+            "channel_id": self.voice_controller.voice_channel_id,
+            "channel_name": self.voice_controller.voice_channel_name,
+            "guild_id": self.voice_controller.voice_guild_id,
+            "in_voice": self.voice_controller.voice_channel_id is not None,
+            "members": self.voice_controller.voice_members,
+            "speaking_users": speaking_users,
+            "mode_type": self.voice_controller.mode_type,
+            "noise_suppression": self.voice_controller.noise_suppression,
+            "echo_cancellation": self.voice_controller.echo_cancellation,
+            "automatic_gain_control": self.voice_controller.automatic_gain_control,
+        }
+
+    async def toggle_mute(self) -> dict:
+        """Toggle mute state."""
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated"}
+
+        return self.voice_controller.toggle_mute()
+
+    async def toggle_deafen(self) -> dict:
+        """Toggle deafen state."""
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated"}
+
+        return self.voice_controller.toggle_deafen()
+
+    async def set_input_volume(self, volume: int) -> dict:
+        """Set microphone input volume (0-100)."""
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated"}
+
+        result = self.voice_controller.set_input_volume(volume)
+        return {"success": result.get("success"), "volume": volume}
+
+    async def set_output_volume(self, volume: int) -> dict:
+        """Set voice output volume (0-200)."""
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated"}
+
+        result = self.voice_controller.set_output_volume(volume)
+        return {"success": result.get("success"), "volume": volume}
+
+    async def leave_voice(self) -> dict:
+        """Leave current voice channel."""
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated"}
+
+        if self.voice_controller.select_voice_channel(None):
+            self.voice_controller.voice_channel_id = None
+            self.voice_controller.voice_channel_name = None
+            return {"success": True}
+
+        return {"success": False, "message": "Failed to leave channel"}
+
+    # ==================== GUILDS AND CHANNELS ====================
+
+    async def get_guilds(self) -> dict:
+        """Get list of guilds (servers)."""
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated", "guilds": []}
+
+        self.guilds_cache = self.voice_controller.get_guilds()
+
+        return {
+            "success": True,
+            "guilds": self.guilds_cache,
+            "selected_guild_id": self.selected_guild_id
+        }
+
+    async def select_guild(self, guild_id: str) -> dict:
+        """Select a guild (server)."""
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated"}
+
+        self.selected_guild_id = guild_id
+        self.settings_manager.save_settings({"selected_guild_id": guild_id})
+
+        return {"success": True, "guild_id": guild_id}
+
+    async def get_voice_channels(self, guild_id: str = None) -> dict:
+        """Get voice channels for a guild."""
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated", "channels": []}
+
+        if not guild_id:
+            guild_id = self.selected_guild_id
+
+        if not guild_id:
+            self.voice_controller.get_selected_voice_channel()
+            guild_id = self.voice_controller.voice_guild_id
+
+        if not guild_id:
+            return {"success": False, "message": "No server selected", "channels": []}
+
+        channels = self.voice_controller.get_channels(guild_id)
+
+        return {"success": True, "guild_id": guild_id, "channels": channels}
+
+    async def join_voice_channel(self, channel_id: str) -> dict:
+        """Join a voice channel."""
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated"}
+
+        if self.voice_controller.select_voice_channel(channel_id, force=True):
+            self.voice_controller.get_selected_voice_channel()
+            return {
+                "success": True,
+                "channel_id": self.voice_controller.voice_channel_id,
+                "channel_name": self.voice_controller.voice_channel_name
+            }
+
+        return {"success": False, "message": "Failed to join channel"}
+
+    # ==================== USER VOICE SETTINGS ====================
+
+    async def set_user_volume(self, user_id: str, volume: int) -> dict:
+        """
+        Set volume for a specific user (0-200).
+
+        If user_id is the current user, redirects to set_output_volume.
+        """
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated"}
+
+        volume = max(0, min(200, volume))
+
+        # Redirect if setting own volume
+        if self.rpc_client.user and str(self.rpc_client.user.get('id')) == str(user_id):
+            decky.logger.info("Discord Lite: Redirecting own volume to output_volume")
+            return await self.set_output_volume(volume)
+
+        # Convert perceptual to amplitude
+        amplitude = int(perceptual_to_amplitude(volume, 200))
+
+        decky.logger.info(f"Discord Lite: set_user_volume user={user_id} perceptual={volume} amplitude={amplitude}")
+
+        if self.voice_controller.set_user_voice_settings(user_id, volume=amplitude):
+            return {"success": True, "user_id": user_id, "volume": volume}
+
+        return {"success": False, "message": "Failed to set user volume"}
+
+    async def mute_user(self, user_id: str, mute: bool) -> dict:
+        """
+        Mute/unmute a specific user.
+
+        If user_id is the current user, redirects to toggle_mute.
+        """
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated"}
+
+        # Redirect if muting self
+        if self.rpc_client.user and str(self.rpc_client.user.get('id')) == str(user_id):
+            decky.logger.info("Discord Lite: Redirecting own mute to toggle_mute")
+            current_mute = self.voice_controller.is_muted
+
+            if current_mute != mute:
+                return await self.toggle_mute()
+            else:
+                return {"success": True, "user_id": user_id, "muted": mute, "message": "Already in correct state"}
+
+        if self.voice_controller.set_user_voice_settings(user_id, mute=mute):
+            return {"success": True, "user_id": user_id, "muted": mute}
+
+        return {"success": False, "message": "Failed to mute user"}
+
+    # ==================== ADVANCED VOICE SETTINGS ====================
+
+    async def set_voice_mode(self, mode_type: str) -> dict:
+        """Set voice mode (VOICE_ACTIVITY or PUSH_TO_TALK)."""
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated"}
+
+        if mode_type not in ["VOICE_ACTIVITY", "PUSH_TO_TALK"]:
+            return {"success": False, "message": "Invalid mode type"}
+
+        result = self.voice_controller.set_voice_settings(mode={"type": mode_type})
+
+        if result.get("success"):
+            self.voice_controller.mode_type = mode_type
+            return {"success": True, "mode_type": mode_type}
+
+        return result
+
+    async def set_ptt_shortcut(self, key_type: int, key_code: int, key_name: str) -> dict:
+        """Set push-to-talk shortcut."""
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated"}
+
+        shortcut = [{"type": key_type, "code": key_code, "name": key_name}]
+
+        result = self.voice_controller.set_voice_settings(mode={
+            "type": "PUSH_TO_TALK",
+            "shortcut": shortcut,
+            "delay": 100.0
+        })
+
+        if result.get("success"):
+            self.voice_controller.mode_type = "PUSH_TO_TALK"
+            return {"success": True, "shortcut": key_name}
+
+        return result
+
+    async def set_noise_suppression(self, enabled: bool) -> dict:
+        """Enable/disable noise suppression."""
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated"}
+
+        result = self.voice_controller.set_voice_settings(noise_suppression=enabled)
+
+        if result.get("success"):
+            self.voice_controller.noise_suppression = enabled
+            return {"success": True, "enabled": enabled}
+
+        return result
+
+    async def set_echo_cancellation(self, enabled: bool) -> dict:
+        """Enable/disable echo cancellation."""
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated"}
+
+        result = self.voice_controller.set_voice_settings(echo_cancellation=enabled)
+
+        if result.get("success"):
+            self.voice_controller.echo_cancellation = enabled
+            return {"success": True, "enabled": enabled}
+
+        return result
+
+    async def set_automatic_gain_control(self, enabled: bool) -> dict:
+        """Enable/disable automatic gain control."""
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated"}
+
+        result = self.voice_controller.set_voice_settings(automatic_gain_control=enabled)
+
+        if result.get("success"):
+            self.voice_controller.automatic_gain_control = enabled
+            return {"success": True, "enabled": enabled}
+
+        return result
+
+    # ==================== SETTINGS ====================
+
     async def get_settings(self) -> dict:
-        """Retorna as configurações do plugin"""
-        settings = self.load_settings()
+        """Get plugin settings."""
+        settings = self.settings_manager.load_settings()
+
         return {
             "success": True,
             "settings": {
@@ -879,815 +610,160 @@ class Plugin:
                 "game_sync_enabled": settings.get("game_sync_enabled", True),
             }
         }
-    
+
     async def save_settings_async(self, settings: dict) -> dict:
-        """Salva as configurações do plugin"""
+        """Save plugin settings."""
         try:
-            self.save_settings(settings)
-            
+            self.settings_manager.save_settings(settings)
+
+            # Handle game sync toggle
             if "game_sync_enabled" in settings:
                 self.game_sync_enabled = settings["game_sync_enabled"]
-                
-                if not self.game_sync_enabled:
-                    decky.logger.info("Discord Lite: Sync desativado via UI. Limpando tudo...")
 
-                    if hasattr(self, 'current_game_rpc') and self.current_game_rpc:
-                        try:
-                            self.current_game_rpc.close()
-                        except: pass
-                        self.current_game_rpc = None
+                if not self.game_sync_enabled and self.activity_sync:
+                    self.activity_sync.clear()
+                elif self.game_sync_enabled and self.activity_sync:
+                    self.activity_sync.sync()
 
-                    if self.rpc:
-                        try:
-                            self.rpc.clear_activity()
-                        except: pass
-                    
-                    # 3. Resetar variáveis de estado
-                    self.current_game_appid = None
-                    self.current_game_name = None
-                    self.game_start_time = None
-            
-            else: 
-                self.sync_game_to_discord()
-                
             return {"success": True}
+
         except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro ao salvar settings: {e}")
+            decky.logger.error(f"Discord Lite: Error saving settings: {e}")
             return {"success": False, "message": str(e)}
-    
-    async def _main(self):
-        decky.logger.info("Discord Lite: Iniciando...")
-        self.load_token()
-        settings = self.load_settings()
-        self.selected_guild_id = settings.get("selected_guild_id")
-        self.game_sync_enabled = settings.get("game_sync_enabled", True)
-    
-    async def _unload(self):
-        decky.logger.info("Discord Lite: Descarregando...")
-        self.stop_voice_polling()
-        if self.rpc:
-            self.rpc.disconnect()
-    
-    # ==================== VOICE POLLING SYSTEM ====================
-    
-    def start_voice_polling(self):
-        """Inicia polling em background para detectar mudanças de membros"""
-        if self.voice_polling_active:
-            return
-        
-        # Inicializar previous_members com membros atuais para evitar toasts iniciais
-        self.initial_sync_done = False
-        if self.rpc and self.rpc.authenticated:
-            try:
-                self.rpc.get_selected_voice_channel()
-                self.previous_members = {}
-                for member in self.rpc.voice_members:
-                    user_id = member.get("user_id")
-                    if user_id:
-                        self.previous_members[user_id] = {
-                            "username": member.get("username", "Usuário"),
-                            "avatar": member.get("avatar"),
-                            "user_id": user_id
-                        }
-                decky.logger.info(f"Discord Lite: Sincronizados {len(self.previous_members)} membros iniciais")
-            except Exception as e:
-                decky.logger.error(f"Discord Lite: Erro ao sincronizar membros iniciais: {e}")
-        
-        self.initial_sync_done = True
-        self.voice_polling_active = True
-        self.voice_polling_thread = threading.Thread(target=self._voice_polling_loop, daemon=True)
-        self.voice_polling_thread.start()
-        decky.logger.info("Discord Lite: Polling de voz iniciado")
-    
-    def stop_voice_polling(self):
-        """Para o polling em background"""
-        self.voice_polling_active = False
-        if self.voice_polling_thread:
-            self.voice_polling_thread = None
-        decky.logger.info("Discord Lite: Polling de voz parado")
-    
-    def _voice_polling_loop(self):
-        """Loop de polling inteligente que economiza bateria quando ocioso"""
-        while self.voice_polling_active:
-            try:
-                start_time = time.time()
-                
-                if self.rpc and self.rpc.authenticated:
-                    # 1. Executa tarefas
-                    self._check_voice_members_changes()
-                    self.sync_game_to_discord()
-                
-                is_active = (self.rpc and self.rpc.voice_channel_id) or self.current_game_appid
-                
-                target_interval = 15.0 if is_active else 60.0
-                
-                elapsed = time.time() - start_time
-                sleep_time = max(1.0, target_interval - elapsed)
-                
-                time.sleep(sleep_time)
 
-            except Exception as e:
-                decky.logger.error(f"Discord Lite: Erro no polling: {e}")
-                time.sleep(20.0) 
-    
-    def read_n_bytes(self, n: int) -> bytes:
-            """
-            Lê EXATAMENTE n bytes do socket.
-            Isso é crucial para evitar que JSONs grandes sejam cortados pela metade.
-            """
-            data = b''
-            while len(data) < n:
-                try:
-                    packet = self.socket.recv(n - len(data))
-                    if not packet:
-                        raise Exception("Conexão fechada pelo par durante a leitura")
-                    data += packet
-                except socket.timeout:
-                    raise
-            return data
-
-    def _check_voice_members_changes(self):
-        """Verifica mudanças nos membros do canal de voz"""
-        try:
-            # 1. Se ainda não sincronizou a primeira vez, não faz nada
-            if not self.initial_sync_done:
-                return
-            
-            if not self.rpc.voice_channel_id:
-                return 
-            data = self.rpc.get_selected_voice_channel()
-            
-            if not data:
-                self.rpc.voice_channel_id = None
-                self.rpc.voice_members = [] 
-                self.previous_members = {}  
-                return
-            
-            current_members = {}
-            for member in self.rpc.voice_members:
-                user_id = member.get("user_id")
-                if user_id:
-                    current_members[user_id] = {
-                        "username": member.get("username", "Usuário"),
-                        "avatar": member.get("avatar"),
-                        "user_id": user_id
-                    }
-            
-            for user_id, info in current_members.items():
-                if user_id not in self.previous_members:
-                    decky.logger.info(f"Discord Lite: {info['username']} entrou no canal")
-                    self.event_queue.put({
-                        "type": "VOICE_JOIN",
-                        "user_id": user_id,
-                        "username": info["username"],
-                        "avatar": info.get("avatar")
-                    })
-            
-            for user_id, info in self.previous_members.items():
-                if user_id not in current_members:
-                    decky.logger.info(f"Discord Lite: {info['username']} saiu do canal")
-                    self.event_queue.put({
-                        "type": "VOICE_LEAVE",
-                        "user_id": user_id,
-                        "username": info["username"],
-                        "avatar": info.get("avatar")
-                    })
-            
-            self.previous_members = current_members
-            
-        except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro ao verificar membros: {e}")
-
-    async def get_pending_events(self) -> dict:
-        """Retorna eventos pendentes da fila (chamado pelo frontend)"""
-        events = []
-        try:
-            while True:
-                event = self.event_queue.get_nowait()
-                events.append(event)
-        except Empty:
-            pass
-        
-        return {"success": True, "events": events}
-    
-    def _generate_pkce(self):
-        """Gera o par Verifier/Challenge para PKCE"""
-        verifier = secrets.token_urlsafe(32)
-        digest = hashlib.sha256(verifier.encode()).digest()
-        # Base64 URL-safe sem padding
-        challenge = base64.urlsafe_b64encode(digest).decode().rstrip('=')
-        return verifier, challenge
-    
-    def _exchange_code_sync(self, code: str, code_verifier: str) -> dict:
-        import urllib.request
-        import urllib.parse
-        import ssl
-        
-        decky.logger.info("Discord Lite: Trocando código por token (PKCE)...")
-        
-        # Payload para Cliente Público (sem client_secret)
-        data_dict = {
-            "grant_type": "authorization_code",
-            "client_id": self.CLIENT_ID,
-            "code": code,
-            "code_verifier": code_verifier,
-            # Se der erro de "redirect_uri mismatch", descomente a linha abaixo:
-            # "redirect_uri": "http://127.0.0.1" 
-        }
-        
-        data = urllib.parse.urlencode(data_dict).encode()
-        
-        # Contexto SSL seguro para Steam Deck
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-        
-        try:
-            req = urllib.request.Request(
-                "https://discord.com/api/oauth2/token",
-                data=data,
-                method="POST",
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-                    "Accept": "application/json"
-                    # Note que não enviamos mais o header Authorization Basic!
-                }
-            )
-            
-            with urllib.request.urlopen(req, timeout=15, context=ssl_context) as resp:
-                result = json.loads(resp.read().decode())
-                access_token = result.get("access_token")
-                
-                if access_token:
-                    decky.logger.info("Discord Lite: Token obtido via PKCE!")
-                    return {"success": True, "access_token": access_token}
-                else:
-                    decky.logger.error(f"Discord Lite: Resposta sem token: {result}")
-                    return {"success": False, "message": f"Erro na API: {result.get('error_description')}"}
-                    
-        except urllib.error.HTTPError as e:
-            error_msg = e.read().decode()
-            decky.logger.error(f"Discord Lite: Erro HTTP {e.code}: {error_msg}")
-            return {"success": False, "message": f"Erro HTTP {e.code}"}
-        except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro Geral: {e}")
-            return {"success": False, "message": str(e)}
-    
-    # ==================== DISCORD LAUNCHER ====================
-    
-    async def check_discord_installed(self) -> dict:
-        """Verifica se Discord está instalado"""
-        flatpak_path = os.path.expanduser("~/.var/app/com.discordapp.Discord")
-        flatpak_installed = os.path.exists(flatpak_path)
-        
-        native_paths = ["/usr/bin/discord", "/usr/bin/Discord", os.path.expanduser("~/Discord/Discord")]
-        native_installed = any(os.path.exists(p) for p in native_paths)
-        
-        return {
-            "success": True,
-            "installed": flatpak_installed or native_installed,
-            "flatpak": flatpak_installed,
-            "native": native_installed
-        }
-    
-    async def launch_discord(self) -> dict:
-        """Inicia o Discord"""
-        try:
-            flatpak_path = os.path.expanduser("~/.var/app/com.discordapp.Discord")
-            if os.path.exists(flatpak_path):
-                subprocess.Popen(
-                    ["flatpak", "run", "com.discordapp.Discord"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True
-                )
-                return {"success": True, "message": "Discord iniciado (Flatpak)"}
-            
-            for path in ["/usr/bin/discord", "/usr/bin/Discord"]:
-                if os.path.exists(path):
-                    subprocess.Popen(
-                        [path],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        start_new_session=True
-                    )
-                    return {"success": True, "message": "Discord iniciado"}
-            
-            return {"success": False, "message": "Discord não encontrado"}
-            
-        except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro ao iniciar Discord: {e}")
-            return {"success": False, "message": str(e)}
-    
-    async def check_discord_running(self) -> dict:
-        """Verifica se Discord está rodando procurando o socket IPC"""
-        try:
-            # Cria uma instância temporária apenas para procurar o arquivo
-            temp_rpc = DiscordRPC(self.CLIENT_ID)
-            ipc_path = temp_rpc.get_ipc_path()
-            
-            # Se achou o arquivo, o Discord está aberto
-            is_running = ipc_path is not None
-            
-            return {"success": True, "running": is_running}
-        except Exception as e:
-            decky.logger.error(f"Discord Lite: Erro check running: {e}")
-            return {"success": False, "running": False}
-    
-    # ==================== AUTO AUTH ====================
-    
-    async def auto_auth(self) -> dict:
-        if self.auth_in_progress: 
-            return {"success": False, "message": "Em andamento"}
-        
-        self.auth_in_progress = True
-        
-        try:
-            # 1. CRÍTICO: Garante que tentamos ler o token do disco antes de tudo
-            if not self.access_token:
-                self.load_token()
-
-            # Cria a conexão RPC
-            self.rpc = DiscordRPC(self.CLIENT_ID)
-            
-            # Tenta conectar no socket
-            if not self.rpc.connect(): 
-                return {"success": False, "message": "Discord fechado ou socket não encontrado"}
-            
-            # 2. Tenta logar direto usando o token salvo (Fast Login)
-            if self.access_token:
-                decky.logger.info("Discord Lite: Tentando login com token salvo...")
-                if self.rpc.authenticate(self.access_token):
-                    self.start_voice_polling()
-                    username = self.rpc.user.get('username', 'Usuário')
-                    return {
-                        "success": True, 
-                        "authenticated": True, 
-                        "user": self.rpc.user, 
-                        "message": f"Conectado como {username}"
-                    }
-                else:
-                    decky.logger.warning("Discord Lite: Token salvo expirou ou é inválido.")
-                    self.access_token = None # Token ruim, limpa para pedir um novo
-            
-            # 3. Se não tem token ou falhou, inicia o fluxo de autorização no navegador (PKCE)
-            decky.logger.info("Discord Lite: Iniciando fluxo PKCE (Nova autorização)")
-            verifier, challenge = self._generate_pkce()
-            
-            # Envia o pedido para o Discord Desktop (janela de "Autorizar" aparece lá)
-            code = self.rpc.authorize(self.SCOPES, challenge)
-            
-            if not code: 
-                return {"success": False, "message": "Autorização recusada pelo usuário"}
-            
-            # Troca o código pelo token real
-            exchange = self._exchange_code_sync(code, verifier)
-            
-            if not exchange.get("success"): 
-                return exchange
-            
-            # 4. Reconecta e Loga com o token novo
-            self.rpc.disconnect()
-            self.rpc = DiscordRPC(self.CLIENT_ID)
-            
-            if not self.rpc.connect():
-                return {"success": False, "message": "Falha na reconexão pós-auth"}
-
-            new_token = exchange["access_token"]
-            
-            if self.rpc.authenticate(new_token):
-                self.access_token = new_token
-                self.save_token(new_token) # Salva para a próxima vez
-                self.start_voice_polling()
-                return {
-                    "success": True, 
-                    "authenticated": True, 
-                    "user": self.rpc.user
-                }
-            
-            return {"success": False, "message": "Falha na autenticação final"}
-            
-        except Exception as e: 
-            decky.logger.error(f"Discord Lite: Erro no auto_auth: {e}")
-            return {"success": False, "message": str(e)}
-        finally: 
-            self.auth_in_progress = False
-    
-    # ==================== STATUS & VOZ ====================
-    
-    async def check_status(self) -> dict:
-        if not self.rpc or not self.rpc.connected:
-            return {
-                "success": False,
-                "connected": False,
-                "authenticated": False,
-                "message": "Não conectado"
-            }
-        
-        return {
-            "success": True,
-            "connected": True,
-            "authenticated": self.rpc.authenticated,
-            "user": self.rpc.user if self.rpc.authenticated else None,
-            "message": "Conectado" if self.rpc.authenticated else "Não autorizado"
-        }
-    
-    async def logout(self) -> dict:
-        self.access_token = None
-        
-        try:
-            path = self.get_token_path()
-            if os.path.exists(path):
-                os.remove(path)
-        except:
-            pass
-        
-        if self.rpc:
-            self.rpc.authenticated = False
-            self.rpc.access_token = None
-        
-        return {"success": True, "message": "Desconectado"}
-    
-    async def get_voice_state(self) -> dict:
-        if not self.rpc or not self.rpc.authenticated:
-            return {"success": False, "message": "Não autenticado", "authenticated": False}
-        
-        self.rpc.get_voice_settings()
-        self.rpc.get_selected_voice_channel()
-        
-        # Pega quem está falando atualmente
-        speaking_users = self.rpc.get_speaking_users() if hasattr(self.rpc, 'get_speaking_users') else []
-        
-        return {
-            "success": True,
-            "authenticated": True,
-            "is_muted": self.rpc.is_muted,
-            "is_deafened": self.rpc.is_deafened,
-            "input_volume": self.rpc.input_volume,
-            "output_volume": self.rpc.output_volume,
-            "channel_id": self.rpc.voice_channel_id,
-            "channel_name": self.rpc.voice_channel_name,
-            "guild_id": self.rpc.voice_guild_id,
-            "in_voice": self.rpc.voice_channel_id is not None,
-            "members": self.rpc.voice_members,
-            "speaking_users": speaking_users,
-            "mode_type": self.rpc.mode_type,
-            "noise_suppression": self.rpc.noise_suppression,
-            "echo_cancellation": self.rpc.echo_cancellation,
-            "automatic_gain_control": self.rpc.automatic_gain_control,
-        }
-    
-    async def toggle_mute(self) -> dict:
-        if not self.rpc or not self.rpc.authenticated:
-            return {"success": False, "message": "Não autenticado"}
-        
-        self.rpc.get_voice_settings()
-        new_state = not self.rpc.is_muted
-        
-        result = self.rpc.set_voice_settings(mute=new_state)
-        if result.get("success"):
-            self.rpc.is_muted = new_state
-            return {"success": True, "is_muted": new_state}
-        
-        return {"success": False, "message": result.get("message", "Falha ao mutar")}
-    
-    async def toggle_deafen(self) -> dict:
-        if not self.rpc or not self.rpc.authenticated:
-            return {"success": False, "message": "Não autenticado"}
-        
-        self.rpc.get_voice_settings()
-        new_state = not self.rpc.is_deafened
-        
-        result = self.rpc.set_voice_settings(deaf=new_state)
-        if result.get("success"):
-            self.rpc.is_deafened = new_state
-            if new_state:
-                self.rpc.is_muted = True
-            return {"success": True, "is_deafened": new_state, "is_muted": self.rpc.is_muted}
-        
-        return {"success": False, "message": result.get("message", "Falha")}
-    
-    async def set_input_volume(self, volume: int) -> dict:
-        decky.logger.info(f"Discord Lite: set_input_volume chamado com volume={volume}")
-        if not self.rpc or not self.rpc.authenticated:
-            decky.logger.error("Discord Lite: Não autenticado para set_input_volume")
-            return {"success": False, "message": "Não autenticado"}
-
-        volume = max(0, min(100, volume))
-        # Converter perceptual (UI) para amplitude (RPC)
-        amplitude = perceptual_to_amplitude(volume, 100)
-        decky.logger.info(f"Discord Lite: Enviando SET_VOICE_SETTINGS input perceptual={volume} amplitude={amplitude}")
-        result = self.rpc.set_voice_settings(input={"volume": amplitude})
-        decky.logger.info(f"Discord Lite: Resultado SET_VOICE_SETTINGS: {result}")
-
-        if result.get("success"):
-            self.rpc.input_volume = volume
-            return {"success": True, "volume": volume}
-
-        decky.logger.error(f"Discord Lite: Falha ao definir volume de entrada: {result}")
-        return {"success": False, "message": result.get("message", "Falha")}
-
-    async def set_output_volume(self, volume: int) -> dict:
-        decky.logger.info(f"Discord Lite: set_output_volume chamado com volume={volume}")
-        if not self.rpc or not self.rpc.authenticated:
-            decky.logger.error("Discord Lite: Não autenticado para set_output_volume")
-            return {"success": False, "message": "Não autenticado"}
-
-        volume = max(0, min(200, volume))
-        # Converter perceptual (UI) para amplitude (RPC)
-        amplitude = perceptual_to_amplitude(volume, 200)
-        decky.logger.info(f"Discord Lite: Enviando SET_VOICE_SETTINGS output perceptual={volume} amplitude={amplitude}")
-        result = self.rpc.set_voice_settings(output={"volume": amplitude})
-        decky.logger.info(f"Discord Lite: Resultado SET_VOICE_SETTINGS: {result}")
-
-        if result.get("success"):
-            self.rpc.output_volume = volume
-            return {"success": True, "volume": volume}
-
-        decky.logger.error(f"Discord Lite: Falha ao definir volume de saída: {result}")
-        return {"success": False, "message": result.get("message", "Falha")}
-
-    
-    async def leave_voice(self) -> dict:
-        if not self.rpc or not self.rpc.authenticated:
-            return {"success": False, "message": "Não autenticado"}
-        
-        if self.rpc.select_voice_channel(None):
-            self.rpc.voice_channel_id = None
-            self.rpc.voice_channel_name = None
-            return {"success": True}
-        
-        return {"success": False, "message": "Falha"}
-    
-    # ==================== SERVIDORES E CANAIS ====================
-    
-    async def get_guilds(self) -> dict:
-        if not self.rpc or not self.rpc.authenticated:
-            return {"success": False, "message": "Não autenticado", "guilds": []}
-        
-        self.guilds_cache = self.rpc.get_guilds()
-        return {
-            "success": True,
-            "guilds": self.guilds_cache,
-            "selected_guild_id": self.selected_guild_id
-        }
-    
-    async def select_guild(self, guild_id: str) -> dict:
-        if not self.rpc or not self.rpc.authenticated:
-            return {"success": False, "message": "Não autenticado"}
-        
-        self.selected_guild_id = guild_id
-        self.save_settings({"selected_guild_id": guild_id})
-        
-        return {"success": True, "guild_id": guild_id}
-    
-    async def get_voice_channels(self, guild_id: str = None) -> dict:
-        if not self.rpc or not self.rpc.authenticated:
-            return {"success": False, "message": "Não autenticado", "channels": []}
-        
-        if not guild_id:
-            guild_id = self.selected_guild_id
-        
-        if not guild_id:
-            self.rpc.get_selected_voice_channel()
-            guild_id = self.rpc.voice_guild_id
-        
-        if not guild_id:
-            return {"success": False, "message": "Selecione um servidor", "channels": []}
-        
-        channels = self.rpc.get_channels(guild_id)
-        return {"success": True, "guild_id": guild_id, "channels": channels}
-    
-    async def join_voice_channel(self, channel_id: str) -> dict:
-        if not self.rpc or not self.rpc.authenticated:
-            return {"success": False, "message": "Não autenticado"}
-        
-        if self.rpc.select_voice_channel(channel_id, force=True):
-            self.rpc.get_selected_voice_channel()
-            return {
-                "success": True,
-                "channel_id": self.rpc.voice_channel_id,
-                "channel_name": self.rpc.voice_channel_name
-            }
-        
-        return {"success": False, "message": "Falha"}
-    
-    # ==================== VOLUME INDIVIDUAL ====================
-    
-    async def set_user_volume(self, user_id: str, volume: int) -> dict:
-        if not self.rpc or not self.rpc.authenticated:
-            return {"success": False, "message": "Não autenticado"}
-
-        volume = max(0, min(200, volume))
-
-        # Se o user_id for do próprio usuário, redirecionar para set_output_volume
-        if self.rpc.user and str(self.rpc.user.get('id')) == str(user_id):
-            decky.logger.info(f"Discord Lite: Redirecionando volume do próprio usuário para output_volume")
-            return await self.set_output_volume(volume)
-
-        # Converter perceptual (UI) para amplitude (RPC)
-        amplitude = int(perceptual_to_amplitude(volume, 200))
-        decky.logger.info(f"Discord Lite: set_user_volume user={user_id} perceptual={volume} amplitude={amplitude}")
-        if self.rpc.set_user_voice_settings(user_id, volume=amplitude):
-            return {"success": True, "user_id": user_id, "volume": volume}
-
-        return {"success": False, "message": "Falha"}
-    
-    async def mute_user(self, user_id: str, mute: bool) -> dict:
-        if not self.rpc or not self.rpc.authenticated:
-            return {"success": False, "message": "Não autenticado"}
-
-        # Se o user_id for do próprio usuário, redirecionar para toggle_mute
-        if self.rpc.user and str(self.rpc.user.get('id')) == str(user_id):
-            decky.logger.info(f"Discord Lite: Redirecionando mute do próprio usuário para toggle_mute")
-            current_mute_state = self.rpc.is_muted
-            if current_mute_state != mute:
-                return await self.toggle_mute()
-            else:
-                return {"success": True, "user_id": user_id, "muted": mute, "message": "Estado já correto"}
-
-        if self.rpc.set_user_voice_settings(user_id, mute=mute):
-            return {"success": True, "user_id": user_id, "muted": mute}
-
-        return {"success": False, "message": "Falha"}
-    
-    # ==================== CONFIGURAÇÕES AVANÇADAS ====================
-    
-    async def set_voice_mode(self, mode_type: str) -> dict:
-        """Define modo de voz: VOICE_ACTIVITY ou PUSH_TO_TALK"""
-        if not self.rpc or not self.rpc.authenticated:
-            return {"success": False, "message": "Não autenticado"}
-        
-        if mode_type not in ["VOICE_ACTIVITY", "PUSH_TO_TALK"]:
-            return {"success": False, "message": "Modo inválido"}
-        
-        result = self.rpc.set_voice_settings(mode={"type": mode_type})
-        if result.get("success"):
-            self.rpc.mode_type = mode_type
-            return {"success": True, "mode_type": mode_type}
-        
-        return {"success": False, "message": result.get("message", "Falha")}
-    
-    async def set_ptt_shortcut(self, key_type: int, key_code: int, key_name: str) -> dict:
-        """Define o botão de Push-to-Talk
-        key_type: 0=KEYBOARD_KEY, 1=MOUSE_BUTTON, 2=KEYBOARD_MODIFIER_KEY, 3=GAMEPAD_BUTTON
-        """
-        if not self.rpc or not self.rpc.authenticated:
-            return {"success": False, "message": "Não autenticado"}
-        
-        shortcut = [{"type": key_type, "code": key_code, "name": key_name}]
-        result = self.rpc.set_voice_settings(mode={
-            "type": "PUSH_TO_TALK",
-            "shortcut": shortcut,
-            "delay": 100.0  # 100ms delay
-        })
-        
-        if result.get("success"):
-            self.rpc.mode_type = "PUSH_TO_TALK"
-            return {"success": True, "shortcut": key_name}
-        
-        return {"success": False, "message": result.get("message", "Falha ao configurar PTT")}
-    
-    async def set_noise_suppression(self, enabled: bool) -> dict:
-        """Ativa/desativa supressão de ruído"""
-        if not self.rpc or not self.rpc.authenticated:
-            return {"success": False, "message": "Não autenticado"}
-        
-        decky.logger.info(f"Discord Lite: Alterando noise_suppression para {enabled}")
-        result = self.rpc.set_voice_settings(noise_suppression=enabled)
-        decky.logger.info(f"Discord Lite: Resultado: {result}")
-        
-        if result.get("success"):
-            self.rpc.noise_suppression = enabled
-            return {"success": True, "enabled": enabled}
-        
-        return {"success": False, "message": result.get("message", "Falha ao alterar supressão de ruído")}
-    
-    async def set_echo_cancellation(self, enabled: bool) -> dict:
-        """Ativa/desativa cancelamento de eco"""
-        if not self.rpc or not self.rpc.authenticated:
-            return {"success": False, "message": "Não autenticado"}
-        
-        result = self.rpc.set_voice_settings(echo_cancellation=enabled)
-        if result.get("success"):
-            self.rpc.echo_cancellation = enabled
-            return {"success": True, "enabled": enabled}
-        
-        return {"success": False, "message": result.get("message", "Falha")}
-    
-    async def set_automatic_gain_control(self, enabled: bool) -> dict:
-        """Ativa/desativa controle automático de ganho"""
-        if not self.rpc or not self.rpc.authenticated:
-            return {"success": False, "message": "Não autenticado"}
-        
-        result = self.rpc.set_voice_settings(automatic_gain_control=enabled)
-        if result.get("success"):
-            self.rpc.automatic_gain_control = enabled
-            return {"success": True, "enabled": enabled}
-        
-        return {"success": False, "message": result.get("message", "Falha")}
-    
     # ==================== MEMBER TRACKING ====================
-    
+
     async def get_voice_members_diff(self) -> dict:
-        """Retorna membros que entraram/saíram desde a última verificação"""
-        if not self.rpc or not self.rpc.authenticated:
-            return {"success": False, "message": "Não autenticado"}
-        
-        self.rpc.get_selected_voice_channel()
-        current_members = {}
-        
-        for member in self.rpc.voice_members:
-            user_id = member.get("user_id")
-            if user_id:
-                current_members[user_id] = {
-                    "username": member.get("username", "Usuário"),
-                    "avatar": member.get("avatar"),
-                    "user_id": user_id
-                }
-        
-        # Calcular diferenças
-        current_set = set(current_members.keys())
-        previous_set = set(self.previous_members.keys())
-        
-        joined_ids = current_set - previous_set
-        left_ids = previous_set - current_set
-        
-        joined_info = [current_members[uid] for uid in joined_ids]
-        left_info = [self.previous_members[uid] for uid in left_ids]
-        
-        # Atualizar cache
-        self.previous_members = current_members
-        
+        """Get members who joined/left since last check."""
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated"}
+
+        self.voice_controller.get_selected_voice_channel()
+
+        diff = self.member_tracker.update_and_get_diff(self.voice_controller.voice_members)
+
         return {
             "success": True,
-            "joined": joined_info,
-            "left": left_info,
-            "current_count": len(current_members)
+            "joined": diff["joined"],
+            "left": diff["left"],
+            "current_count": diff["current_count"]
         }
-    
+
     async def sync_full_state(self) -> dict:
-        """Sincroniza estado completo incluindo servidor atual"""
-        if not self.rpc or not self.rpc.authenticated:
-            return {"success": False, "message": "Não autenticado"}
-        
-        # Obter configurações de voz
-        self.rpc.get_voice_settings()
-        
-        # Obter canal de voz atual
-        self.rpc.get_selected_voice_channel()
-        
-        # Se estiver em um canal, atualizar o servidor selecionado
-        if self.rpc.voice_guild_id:
-            self.selected_guild_id = self.rpc.voice_guild_id
-            self.save_settings({"selected_guild_id": self.rpc.voice_guild_id})
-        
-        # Atualizar cache de membros (como dict)
-        self.previous_members = {}
-        for m in self.rpc.voice_members:
-            uid = m.get("user_id")
-            if uid:
-                self.previous_members[uid] = {
-                    "username": m.get("username", "Usuário"),
-                    "avatar": m.get("avatar"),
-                    "user_id": uid
-                }
-        
-        # Obter lista de servidores
-        self.guilds_cache = self.rpc.get_guilds()
-        
+        """Synchronize complete plugin state."""
+        if not self.rpc_client or not self.rpc_client.authenticated:
+            return {"success": False, "message": "Not authenticated"}
+
+        # Get voice settings
+        self.voice_controller.get_voice_settings()
+
+        # Get voice channel
+        self.voice_controller.get_selected_voice_channel()
+
+        # Update selected guild if in voice
+        if self.voice_controller.voice_guild_id:
+            self.selected_guild_id = self.voice_controller.voice_guild_id
+            self.settings_manager.save_settings({"selected_guild_id": self.voice_controller.voice_guild_id})
+
+        # Initialize member tracker
+        self.member_tracker.initialize(self.voice_controller.voice_members)
+
+        # Get guilds
+        self.guilds_cache = self.voice_controller.get_guilds()
+
+        # Get current game
+        current_game = self.activity_sync.get_current_game_info() if self.activity_sync else None
+
         return {
             "success": True,
             "authenticated": True,
-            "is_muted": self.rpc.is_muted,
-            "is_deafened": self.rpc.is_deafened,
-            "input_volume": self.rpc.input_volume,
-            "output_volume": self.rpc.output_volume,
-            "channel_id": self.rpc.voice_channel_id,
-            "channel_name": self.rpc.voice_channel_name,
-            "guild_id": self.rpc.voice_guild_id,
-            "in_voice": self.rpc.voice_channel_id is not None,
-            "members": self.rpc.voice_members,
-            "mode_type": self.rpc.mode_type,
-            "noise_suppression": self.rpc.noise_suppression,
-            "echo_cancellation": self.rpc.echo_cancellation,
-            "automatic_gain_control": self.rpc.automatic_gain_control,
+            "is_muted": self.voice_controller.is_muted,
+            "is_deafened": self.voice_controller.is_deafened,
+            "input_volume": self.voice_controller.input_volume,
+            "output_volume": self.voice_controller.output_volume,
+            "channel_id": self.voice_controller.voice_channel_id,
+            "channel_name": self.voice_controller.voice_channel_name,
+            "guild_id": self.voice_controller.voice_guild_id,
+            "in_voice": self.voice_controller.voice_channel_id is not None,
+            "members": self.voice_controller.voice_members,
+            "mode_type": self.voice_controller.mode_type,
+            "noise_suppression": self.voice_controller.noise_suppression,
+            "echo_cancellation": self.voice_controller.echo_cancellation,
+            "automatic_gain_control": self.voice_controller.automatic_gain_control,
             "guilds": self.guilds_cache,
             "selected_guild_id": self.selected_guild_id,
             "game_sync_enabled": self.game_sync_enabled,
-            "current_game": {
-                "appid": self.current_game_appid,
-                "name": self.current_game_name
-            } if self.current_game_appid else None,
+            "current_game": current_game,
         }
 
-    def _add_to_cache(self, cache_dict: dict, key: str, value: Any, max_size=100):
-        """Adiciona ao cache mantendo um tamanho máximo (LRU simplificado)"""
-        if key in cache_dict:
-            del cache_dict[key]
-        elif len(cache_dict) >= max_size:
-            first_key = next(iter(cache_dict))
-            del cache_dict[first_key]
-        
-        cache_dict[key] = value
+    # ==================== POLLING SYSTEM ====================
+
+    async def get_pending_events(self) -> dict:
+        """Get pending events from polling queue."""
+        events = self.voice_poller.get_pending_events()
+        return {"success": True, "events": events}
+
+    def _start_voice_polling(self):
+        """Start background polling thread."""
+        # Initialize member tracker
+        if self.voice_controller:
+            self.voice_controller.get_selected_voice_channel()
+            self.member_tracker.initialize(self.voice_controller.voice_members)
+
+        # Start polling with callbacks
+        self.voice_poller.start(
+            check_members_callback=self._check_voice_members_changes,
+            sync_game_callback=self._sync_game_to_discord,
+            is_active_callback=self._is_user_active
+        )
+
+    def _check_voice_members_changes(self):
+        """Check for voice member changes (called by poller)."""
+        try:
+            if not self.member_tracker.should_emit_events():
+                return
+
+            if not self.voice_controller.voice_channel_id:
+                return
+
+            self.voice_controller.get_selected_voice_channel()
+
+            if not self.voice_controller.voice_channel_id:
+                self.member_tracker.reset()
+                return
+
+            diff = self.member_tracker.update_and_get_diff(self.voice_controller.voice_members)
+
+            # Enqueue join events
+            for member in diff["joined"]:
+                decky.logger.info(f"Discord Lite: {member['username']} joined channel")
+                self.voice_poller.enqueue_event(
+                    "VOICE_JOIN",
+                    user_id=member["user_id"],
+                    username=member["username"],
+                    avatar=member.get("avatar")
+                )
+
+            # Enqueue leave events
+            for member in diff["left"]:
+                decky.logger.info(f"Discord Lite: {member['username']} left channel")
+                self.voice_poller.enqueue_event(
+                    "VOICE_LEAVE",
+                    user_id=member["user_id"],
+                    username=member["username"],
+                    avatar=member.get("avatar")
+                )
+
+        except Exception as e:
+            decky.logger.error(f"Discord Lite: Error checking member changes: {e}")
+
+    def _sync_game_to_discord(self):
+        """Sync current game to Discord (called by poller)."""
+        if self.activity_sync and self.game_sync_enabled:
+            self.activity_sync.sync()
+
+    def _is_user_active(self) -> bool:
+        """Check if user is active (in voice or game running)."""
+        in_voice = self.voice_controller and self.voice_controller.voice_channel_id is not None
+        game_running = self.activity_sync and self.activity_sync.current_game_appid is not None
+        return in_voice or game_running
