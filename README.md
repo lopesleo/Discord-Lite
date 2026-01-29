@@ -33,16 +33,16 @@ _Control your Discord voice calls directly from the Quick Access Menu_
 | 🌐 **Multi-Language**      | English and Portuguese support                                           |
 | 🎨 **Discord Theme**       | Beautiful Discord-inspired UI                                            |
 
-### 🆕 What's New (v1.2.1)
+### 🆕 What's New (v1.4.1)
 
-| Update                          | Description                                                                                      |
-| ------------------------------- | ------------------------------------------------------------------------------------------------ |
-| 🔐 **PKCE OAuth2**              | Secure authentication without client_secret - enhanced security                                  |
-| 🔊 **Improved Volume Control**  | Fixed self-user volume control (redirects to output volume when adjusting your own audio)        |
-| 🎮 **Enhanced Game Sync**       | Better Discord Rich Presence integration with Steam games - smarter caching and polling          |
-| ⚡ **Discord RPC Improvements** | More reliable IPC connection, better error handling, and improved socket path detection          |
-| 🎨 **UI Tweaks**                | Refined user interface elements for better usability and visual consistency                      |
-| 🛠️ **Build & Deploy Refactor** | Streamlined deployment process for both Windows (PowerShell) and Linux/Mac (Bash) environments |
+| Update                              | Description                                                                                      |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------ |
+| 🏗️ **Backend Refactoring**          | Complete modular architecture - transformed 1693-line monolith into 21 specialized modules      |
+| 📦 **Improved Code Organization**   | Clean separation: RPC, auth, voice, Steam integration, polling, and utilities in dedicated modules |
+| ⚡ **Enhanced Performance**         | Better caching, optimized polling intervals, and smarter dependency injection                    |
+| 🔧 **Build Validation**             | Automatic code verification in build scripts - ensures quality before deployment                 |
+| 🐛 **Module Import Fix**            | Fixed `ModuleNotFoundError` by adding plugin directory to Python path                            |
+| 📚 **Professional Documentation**   | Added ARCHITECTURE.md, REFACTOR_MIGRATION.md, and verification tools                             |
 
 ### 📸 Screenshots
 
@@ -130,16 +130,16 @@ _Screenshots coming soon!_
 | 🌐 **Multi-Idioma**           | Suporte a Inglês e Português                                        |
 | 🎨 **Tema Discord**           | Interface bonita inspirada no Discord                               |
 
-### 🆕 Novidades (v1.2.1)
+### 🆕 Novidades (v1.4.1)
 
-| Atualização                      | Descrição                                                                                           |
-| -------------------------------- | --------------------------------------------------------------------------------------------------- |
-| 🔐 **OAuth2 PKCE**               | Autenticação segura sem client_secret - segurança aprimorada                                        |
-| 🔊 **Controle de Volume Melhorado** | Correção do controle de volume próprio (redireciona para volume de saída ao ajustar seu próprio áudio) |
-| 🎮 **Sincronização de Jogo Aprimorada** | Melhor integração Discord Rich Presence com jogos Steam - cache e polling mais inteligentes    |
-| ⚡ **Melhorias no Discord RPC**  | Conexão IPC mais confiável, melhor tratamento de erros e detecção de caminhos de socket aprimorada |
-| 🎨 **Ajustes de Interface**      | Elementos de interface refinados para melhor usabilidade e consistência visual                     |
-| 🛠️ **Refatoração Build & Deploy** | Processo de deploy otimizado para ambientes Windows (PowerShell) e Linux/Mac (Bash)              |
+| Atualização                         | Descrição                                                                                           |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------- |
+| 🏗️ **Refatoração do Backend**      | Arquitetura modular completa - transformou monólito de 1693 linhas em 21 módulos especializados    |
+| 📦 **Organização de Código Melhorada** | Separação clara: RPC, autenticação, voz, integração Steam, polling e utilitários em módulos dedicados |
+| ⚡ **Performance Aprimorada**       | Melhor caching, intervalos de polling otimizados e injeção de dependências mais inteligente        |
+| 🔧 **Validação de Build**           | Verificação automática de código nos scripts de build - garante qualidade antes do deploy          |
+| 🐛 **Correção de Import de Módulos** | Corrigido `ModuleNotFoundError` adicionando diretório do plugin ao Python path                    |
+| 📚 **Documentação Profissional**    | Adicionados ARCHITECTURE.md, REFACTOR_MIGRATION.md e ferramentas de verificação                    |
 
 ### 📸 Capturas de Tela
 

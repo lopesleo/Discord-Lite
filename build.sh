@@ -23,7 +23,42 @@ NC='\033[0m' # No Color
 
 echo -e "${CYAN}Building ${PLUGIN_NAME} ${VERSION} via WSL...${NC}"
 
-# 1. Limpeza Inicial
+# 1. Code Verification
+# ------------------------------------------
+echo -e "${YELLOW}Verifying code integrity...${NC}"
+
+# Check if Python is available
+if ! command -v python3 &> /dev/null; then
+    echo -e "${YELLOW}Warning: Python3 not found. Skipping code verification.${NC}"
+else
+    # Compile main.py to check for syntax errors
+    if ! python3 -m py_compile main.py 2>/dev/null; then
+        echo -e "\033[0;31mERROR: main.py has syntax errors!${NC}"
+        exit 1
+    fi
+    echo "  ✓ main.py compiled successfully"
+
+    # Compile all backend modules
+    if [ -d "backend" ]; then
+        if ! python3 -m compileall -q backend/ 2>/dev/null; then
+            echo -e "\033[0;31mERROR: Backend modules have syntax errors!${NC}"
+            exit 1
+        fi
+        echo "  ✓ Backend modules compiled successfully"
+
+        # Check for problematic decky imports in backend
+        if grep -r "^import decky\|^from decky" backend/ >/dev/null 2>&1; then
+            echo -e "\033[0;31mERROR: Backend modules should not import decky at module level!${NC}"
+            echo -e "\033[0;31mUse dependency injection instead.${NC}"
+            exit 1
+        fi
+        echo "  ✓ No problematic decky imports found"
+    fi
+
+    echo -e "${GREEN}Code verification passed!${NC}"
+fi
+
+# 2. Limpeza Inicial
 # ------------------------------------------
 if [ -d "$BUILD_DIR" ]; then
     rm -rf "$BUILD_DIR"
@@ -36,7 +71,7 @@ fi
 # Estrutura: temp_build/DiscordLite/arquivos...
 mkdir -p "$BUILD_DIR/$PLUGIN_NAME"
 
-# 2. Copiar Arquivos (dentro da pasta do plugin)
+# 3. Copiar Arquivos (dentro da pasta do plugin)
 # ------------------------------------------
 echo -e "${YELLOW}Copying files...${NC}"
 
@@ -50,7 +85,7 @@ for file in "${files[@]}"; do
 done
 
 # Copiar pastas
-folders=("dist" "defaults" "assets" "lib")
+folders=("dist" "defaults" "assets" "lib" "backend")
 for folder in "${folders[@]}"; do
     if [ -d "$folder" ]; then
         cp -r "$folder" "$BUILD_DIR/$PLUGIN_NAME/"
@@ -59,7 +94,7 @@ for folder in "${folders[@]}"; do
     fi
 done
 
-# 3. Limpeza de Lixo (Python Cache e arquivos Mac/Windows)
+# 4. Limpeza de Lixo (Python Cache e arquivos Mac/Windows)
 # ------------------------------------------
 echo -e "${YELLOW}Cleaning binaries and temp files...${NC}"
 find "$BUILD_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
@@ -67,7 +102,7 @@ find "$BUILD_DIR" -name ".DS_Store" -delete 2>/dev/null || true
 find "$BUILD_DIR" -name "Thumbs.db" -delete 2>/dev/null || true
 find "$BUILD_DIR" -name "*.pyc" -delete 2>/dev/null || true
 
-# 4. FIX CRUCIAL: Permissões e Line Endings
+# 5. FIX CRUCIAL: Permissões e Line Endings
 # ------------------------------------------
 echo -e "${YELLOW}Fixing Permissions and Line Endings (CRLF -> LF)...${NC}"
 
@@ -83,7 +118,7 @@ else
     echo -e "${YELLOW}Warning: 'dos2unix' not found. Ensure your files are saved as LF in VS Code.${NC}"
 fi
 
-# 5. Compactação (com pasta do plugin na raiz do zip)
+# 6. Compactação (com pasta do plugin na raiz do zip)
 # ------------------------------------------
 echo -e "${YELLOW}Compressing package...${NC}"
 
@@ -92,7 +127,7 @@ cd "$BUILD_DIR"
 zip -r -q "../$ZIP_FILE" "$PLUGIN_NAME"
 cd ..
 
-# 6. Limpeza Final e Resultado
+# 7. Limpeza Final e Resultado
 # ------------------------------------------
 rm -rf "$BUILD_DIR"
 
