@@ -41,7 +41,7 @@ foreach ($file in $files) {
 }
 
 # Copiar pastas
-$folders = @('dist', 'defaults', 'assets')
+$folders = @('dist', 'defaults', 'assets', 'backend')
 foreach ($folder in $folders) {
     if (Test-Path $folder) {
         Copy-Item $folder -Destination $tempDir -Recurse -Force
